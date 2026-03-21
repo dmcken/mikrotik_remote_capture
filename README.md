@@ -12,3 +12,7 @@ tshark -f "udp port 37008"
 ```
 
 This leaves the TZSP headers in place however, to use more advanced tools you would want the strip those headers (Frame -> Ethernet -> IP -> UDP).
+
+## Notes
+
+* Underlying protocol - Tazmen Sniffer protocol
