@@ -3,7 +3,9 @@
 Mikrotik Remote packet capture
 
 
-Problem definition: Mikrotik routers have a streaming packet capture feature.
+Problem definition: Mikrotik routers have a streaming packet capture feature (see below)
+
+![Mikrotik capture](Mikrotik-capture.png)
 
 The simplest way to capture this stream is with tshark:
 
