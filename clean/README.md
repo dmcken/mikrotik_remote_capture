@@ -5,7 +5,7 @@ A mikrotik capture has packets with TZSP encapsulation.
 
 ## Using scapy
 
-Scapy is a pythong
+Scapy is a python library for packet manipulation.
 
 ```bash
 time python3 clean/clean_pcap.py
@@ -17,10 +17,10 @@ sys     0m6.687s
 ```
 
 Pros:
-* Adapts to changes in packet format.
+* Easily adapts to changes in packet format.
 
 Cons:
-* Slow - By having to parse and analyze each packet its a much slower process.
+* Slow (relatively speaking) - By having to parse and analyze each packet its a much slower process.
 
 ## Using editcap
 
@@ -33,9 +33,9 @@ Header lengths:
 So an alternative method could be to blindly chop the header off of the begining of each packet.
 
 ```bash
-editcap.exe -C 47 ./200909_MikroTik_TZSP.pcapng ./200909_MikroTik_TZSP_chop.pcapng
+editcap.exe -C 47 <input>.pcapng <output>.pcapng
 
-time editcap -C 47 SIL-issues_00050_20241211045848.pcap SIL-issues_00050_20241211045848-editcap.pcap
+time editcap -C 47 <input file>.pcap <output file>.pcap
 
 real    0m2.855s
 user    0m0.607s
@@ -43,10 +43,10 @@ sys     0m2.188s
 ```
 
 Pros:
-* As shown above its extremely fast.
+* As shown above its extremely fast (since it ignores parsing the packet entirely).
 
 Cons:
-* If the length of the header changes length for any reason, editcap will continue to crop the packet to the
+* If the length of the header changes length for any reason, editcap will continue to crop the packet blindly so data can get corrupted or misformatted.
 
 # Alternative projects:
 
