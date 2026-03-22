@@ -5,10 +5,11 @@ Mikrotik Remote packet capture
 
 Problem definition: Mikrotik routers have a streaming packet capture feature (see below)
 
-via winbox
+Via winbox:
+
 ![Mikrotik capture](Mikrotik-capture.png)
 
-Or via the Mikrotik CLI
+Via the Mikrotik CLI:
 ```
 /tool sniffer
 set filter-interface=trunk-v0010 filter-ip-address=\
