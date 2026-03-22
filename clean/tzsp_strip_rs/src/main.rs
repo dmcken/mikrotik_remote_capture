@@ -1,5 +1,6 @@
 // Rust TZSP stripper
 
+use std::env;
 use pcap::{Capture, Packet};
 
 const ETHER_LEN: usize = 14;
@@ -43,8 +44,21 @@ fn parse_tzsp_header(buf: &[u8]) -> Option<usize> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut cap = Capture::from_file("input.pcap")?;
-    let mut output = cap.savefile("output.pcap")?;
+
+    // CLI args
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() != 3 {
+        eprintln!("Usage: {} <input.pcap> <output.pcap>", args[0]);
+        std::process::exit(1);
+    }
+
+    let input_file = &args[1];
+    let output_file = &args[2];
+
+
+    let mut cap = Capture::from_file(input_file)?;
+    let mut output = cap.savefile(output_file)?;
 
     while let Ok(packet) = cap.next_packet() {
         let data = packet.data;
