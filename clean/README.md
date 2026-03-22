@@ -48,6 +48,26 @@ Pros:
 Cons:
 * If the length of the header changes length for any reason, editcap will continue to crop the packet blindly so data can get corrupted or misformatted.
 
+## Using rust
+
+Test using 1GB pcap file.
+
+```bash
+time cargo run --release -- input.pcap output.pcap
+   Compiling tzsp_strip_rs v0.1.0 (/home/dmcken/code/mikrotik_remote_capture/clean/tzsp_strip_rs)
+    Finished `release` profile [optimized] target(s) in 0.40s
+     Running `target/release/tzsp_strip_rs input.pcap output.pcap`
+Done. Extracted packets are in output.pcap
+
+real    0m3.677s
+user    0m0.639s
+sys     0m2.790s
+```
+
+Pros:
+* Quite fast
+* Actually parses packets for sanity check
+
 # Alternative projects:
 
 * [tzsp2pacp](https://github.com/thefloweringash/tzsp2pcap)
