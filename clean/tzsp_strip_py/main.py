@@ -1,7 +1,5 @@
-'''Clean a mikrotik capture file
+'''Clean a mikrotik / TZSP capture file.
 
-pip install
-- scapy
 '''
 
 # System imports
