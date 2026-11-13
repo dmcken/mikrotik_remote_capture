@@ -152,6 +152,27 @@ def parse_argument() -> argparse.Namespace:
 
     return args
 
+def _packet_time_and_linktype(cap_file, meta) -> tuple[float | None, int]:
+    '''Return a packet's timestamp (seconds since epoch) and link type.
+
+    RawPcapNgReader transparently falls back to RawPcapReader for
+    classic pcap input, and the two yield different metadata:
+    pcapng has per-packet tshigh/tslow/tsresol/linktype, while classic
+    pcap has sec/usec per packet and a single file-wide linktype on the
+    reader. In nanosecond-resolution classic pcap files the "usec"
+    field actually holds nanoseconds.
+    '''
+    if hasattr(meta, 'tshigh'):
+        if meta.tshigh is None:
+            pkt_time = None
+        else:
+            pkt_time = ((meta.tshigh << 32) + meta.tslow) / meta.tsresol
+        return pkt_time, meta.linktype
+
+    frac_div = 1_000_000_000 if cap_file.nano else 1_000_000
+    return meta.sec + meta.usec / frac_div, cap_file.linktype
+
+
 def main() -> None:
     '''Main'''
     args = parse_argument()
@@ -166,18 +187,18 @@ def main() -> None:
     # not I/O, and the stock Rust stripper processes the same file in
     # well under a second). Stripping is now done directly on the raw
     # bytes, the same TZSP-TLV walk the Rust tools in this repo use.
+    #
+    # Input may be pcapng or classic pcap (see _packet_time_and_linktype);
+    # output is always pcapng.
     with scapy.utils.RawPcapNgReader(args.input) as cap_file, \
         scapy.utils.RawPcapNgWriter(args.output) as output_file:
         count = 0
         skipped = 0
         for pkt_bytes, meta in cap_file:
-            if meta.tshigh is None:
-                pkt_time = None
-            else:
-                pkt_time = ((meta.tshigh << 32) + meta.tslow) / meta.tsresol
+            pkt_time, linktype = _packet_time_and_linktype(cap_file, meta)
 
             if not hasattr(output_file, 'linktype'):
-                output_file.linktype = meta.linktype
+                output_file.linktype = linktype
             # write_packet() (unlike write(), which we can't use here
             # since it doesn't accept sec=/preserve original packet
             # timestamps) never writes the Section Header + Interface
