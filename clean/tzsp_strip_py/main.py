@@ -12,6 +12,11 @@ import scapy.utils
 logger = logging.getLogger(__name__)
 
 ETHER_LEN = 14
+ETHERTYPE_IPV4 = 0x0800
+ETHERTYPE_IPV6 = 0x86DD
+IPV4_MIN_LEN = 20
+IPV6_LEN = 40
+IPPROTO_UDP = 17
 
 
 def _read_u16(buf: bytes, offset: int) -> int:
@@ -59,42 +64,47 @@ def parse_tzsp_header(buf: bytes) -> int | None:
 
 
 def strip_tzsp(data: bytes, tzsp_port: int) -> bytes | None:
-    '''Strip TZSP/UDP/IPv4/Ethernet headers from a raw captured frame.
+    '''Strip TZSP/UDP/IP/Ethernet headers from a raw captured frame.
 
-    Returns None whenever the frame isn't a recognisable Ethernet/
-    IPv4/UDP/TZSP packet on tzsp_port, or its TZSP header can't be
-    walked cleanly -- callers should skip these rather than writing
-    them through unstripped.
+    Handles TZSP carried over either IPv4 or IPv6. Returns None
+    whenever the frame isn't a recognisable Ethernet/IPv4-or-IPv6/UDP/
+    TZSP packet on tzsp_port, or its TZSP header can't be walked
+    cleanly -- callers should skip these rather than writing them
+    through unstripped.
     '''
     if len(data) < ETHER_LEN:
         return None
 
     # ----------------------------
-    # Ethernet
+    # Ethernet + IP
     # ----------------------------
     ether_type = _read_u16(data, 12)
-    if ether_type != 0x0800:
-        return None  # not IPv4
-
-    # ----------------------------
-    # IPv4
-    # ----------------------------
-    if len(data) < ETHER_LEN + 20:
-        return None
-
     ip = data[ETHER_LEN:]
-    ihl = (ip[0] & 0x0F) * 4
-    if len(data) < ETHER_LEN + ihl:
-        return None
 
-    protocol = ip[9]
-    if protocol != 17:
-        return None  # not UDP
+    if ether_type == ETHERTYPE_IPV4:
+        if len(ip) < IPV4_MIN_LEN:
+            return None
+        ihl = (ip[0] & 0x0F) * 4
+        if ihl < IPV4_MIN_LEN or len(ip) < ihl:
+            return None
+        if ip[9] != IPPROTO_UDP:
+            return None
+        udp = ip[ihl:]
+    elif ether_type == ETHERTYPE_IPV6:
+        if len(ip) < IPV6_LEN:
+            return None
+        # Next Header must be UDP directly. Extension headers
+        # (hop-by-hop, routing, fragment, ...) aren't walked; a TZSP
+        # stream shouldn't normally carry any.
+        if ip[6] != IPPROTO_UDP:
+            return None
+        udp = ip[IPV6_LEN:]
+    else:
+        return None
 
     # ----------------------------
     # UDP
     # ----------------------------
-    udp = ip[ihl:]
     if len(udp) < 8:
         return None
 

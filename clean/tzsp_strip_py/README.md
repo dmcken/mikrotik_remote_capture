@@ -1,6 +1,6 @@
 # tzsp_strip_py
 
-Removes the Ethernet/IPv4/UDP/TZSP wrapper from every packet in an existing
+Removes the Ethernet/IP/UDP/TZSP wrapper from every packet in an existing
 MikroTik sniffer capture. It writes a new pcapng file containing only the
 original sniffed frames, with their original timestamps.
 
@@ -13,8 +13,9 @@ so it doesn't build scapy layer objects for every packet.
 
 For each packet in the input file it:
 
-1. Checks for an Ethernet frame with ethertype IPv4 (`0x0800`).
-2. Checks that the IPv4 protocol is UDP and the destination port matches
+1. Checks for an Ethernet frame with ethertype IPv4 (`0x0800`) or IPv6
+   (`0x86DD`).
+2. Checks that the IP protocol (IPv6: Next Header) is UDP and the destination port matches
    `--port`.
 3. Walks the TZSP header's tag list, handling the zero-length PADDING and END
    tags.
@@ -73,5 +74,6 @@ Progress is logged every 100,000 packets, followed by a summary:
   `editcap -F pcapng input.pcap input.pcapng`.
 - Timestamps are converted through a float, so nanosecond-resolution captures
   lose some sub-microsecond precision.
-- IPv4 only, Ethernet input only, no VLAN tags, no IP reassembly. See the
+- No IPv6 extension headers, Ethernet input only, no VLAN tags, no IP
+  reassembly. See the
   [parent README](../README.md#shared-limitations).
