@@ -70,6 +70,17 @@ Progress is logged every 100,000 packets, followed by a summary:
 ... - INFO - Completed processing 245,312 packets (17 skipped, not TZSP/unparseable; 0 skipped, non-Ethernet encapsulation)
 ```
 
+## Tests
+
+The parser is checked against the shared cases in
+[`testdata/tzsp_vectors.tsv`](../../testdata/tzsp_vectors.tsv), the same file
+the Rust [`tzsp`](../../tzsp/README.md) crate tests against, so the two
+implementations can't drift apart unnoticed:
+
+```bash
+uv run python -m unittest discover -s tests
+```
+
 ## Limitations
 
 - Output timestamps have microsecond resolution, and are converted through a

@@ -39,11 +39,11 @@ def _read_u16(buf: bytes, offset: int) -> int:
 def parse_tzsp_header(buf: bytes) -> int | None:
     '''Walk a TZSP header's tag list and return its total size.
 
-    Mirrors tzsp_ng_capture/clean/tzsp_strip_rs's own parse_tzsp_header
-    (Rust) -- tag 0 (PADDING) and tag 1 (END) are both zero-length (no
-    length byte of their own, unlike every other tag); RouterOS emits
-    PADDING for alignment, and treating it like a normal tagged field
-    desyncs the rest of the walk.
+    Python port of parse_header() in the Rust tzsp crate (tzsp/src/lib.rs);
+    both are checked against testdata/tzsp_vectors.tsv. Tag 0 (PADDING)
+    and tag 1 (END) are both zero-length (no length byte of their own,
+    unlike every other tag); RouterOS emits PADDING for alignment, and
+    treating it like a normal tagged field desyncs the rest of the walk.
     '''
     if len(buf) < 4:
         return None
@@ -76,10 +76,28 @@ def parse_tzsp_header(buf: bytes) -> int | None:
     return None
 
 
+def strip_tzsp_payload(tzsp: bytes) -> tuple[int, bytes] | None:
+    '''Strip the TZSP header from a UDP payload.
+
+    Python port of strip() in the Rust tzsp crate. Returns
+    (encapsulation, inner_frame), or None if the header can't be walked
+    cleanly or carries no frame (e.g. keepalives).
+    '''
+    tzsp_hdr_len = parse_tzsp_header(tzsp)
+    if tzsp_hdr_len is None or tzsp_hdr_len >= len(tzsp):
+        return None
+
+    # parse_tzsp_header() guarantees the 4-byte fixed header exists.
+    encapsulation = _read_u16(tzsp, 2)
+
+    return encapsulation, tzsp[tzsp_hdr_len:]
+
+
 def strip_tzsp(data: bytes, tzsp_port: int) -> tuple[int, bytes] | None:
     '''Strip TZSP/UDP/IP/Ethernet headers from a raw captured frame.
 
-    Handles TZSP carried over either IPv4 or IPv6. On success returns
+    Python port of strip_frame() in the Rust tzsp crate. Handles TZSP
+    carried over either IPv4 or IPv6. On success returns
     (encapsulation, inner_frame), where encapsulation is the TZSP
     encapsulation type (1 = Ethernet, 18 = 802.11, ...) that callers
     must check before writing the frame. Returns None
@@ -131,16 +149,7 @@ def strip_tzsp(data: bytes, tzsp_port: int) -> tuple[int, bytes] | None:
     # ----------------------------
     # TZSP
     # ----------------------------
-    tzsp = udp[8:]
-
-    tzsp_hdr_len = parse_tzsp_header(tzsp)
-    if tzsp_hdr_len is None or tzsp_hdr_len >= len(tzsp):
-        return None
-
-    # parse_tzsp_header() guarantees the 4-byte fixed header exists.
-    encapsulation = _read_u16(tzsp, 2)
-
-    return encapsulation, tzsp[tzsp_hdr_len:]
+    return strip_tzsp_payload(udp[8:])
 
 
 def parse_argument() -> argparse.Namespace:
