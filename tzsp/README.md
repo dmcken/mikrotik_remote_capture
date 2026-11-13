@@ -11,7 +11,7 @@ in this repo:
 | Item | Purpose |
 |------|---------|
 | `strip(payload)` | Remove the TZSP header from a UDP payload. Returns `(encapsulation, frame)` or `None`. |
-| `strip_frame(frame, port)` | Remove the whole Ethernet/IPv4-or-IPv6/UDP/TZSP wrapper from a captured frame, checking the UDP destination port. Same return value. |
+| `strip_frame(frame, port)` | Remove the whole Ethernet/IPv4-or-IPv6/UDP/TZSP wrapper from a captured frame, skipping any VLAN tags (802.1Q, QinQ) and checking the UDP destination port. Same return value. |
 | `parse_header(buf)` | Length of the TZSP header (fixed part plus tagged fields up to END), or `None`. |
 | `DEFAULT_PORT`, `ENCAP_ETHERNET` | 37008 and 1. |
 | `encap_name(encap)` | Readable name for an encapsulation value, for messages. |

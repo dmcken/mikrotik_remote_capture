@@ -19,10 +19,10 @@ To capture and strip in one step instead, see
 | [`tzsp_strip_rs`](tzsp_strip_rs/README.md) | pcap or pcapng | pcap (ns timestamps) | Fastest. Pure Rust, no libpcap. |
 | [`tzsp_strip_py`](tzsp_strip_py/README.md) | pcap or pcapng | pcapng | Easiest to modify. Runs with `uvx`, no build step. |
 
-Both tools parse each packet (Ethernet → IPv4 or IPv6 → UDP → TZSP, including TZSP
-tagged fields) and only write the inner frame. Packets that aren't valid
-TZSP, or don't parse cleanly, are skipped instead of being written still
-wrapped.
+Both tools parse each packet (Ethernet → optional VLAN tags → IPv4 or IPv6 →
+UDP → TZSP, including TZSP tagged fields) and only write the inner frame.
+Packets that aren't valid TZSP, or don't parse cleanly, are skipped instead of
+being written still wrapped.
 
 ### Shared limitations
 
@@ -36,8 +36,6 @@ wrapped.
   sniffing a wireless interface, are skipped and counted separately, with a
   warning when the first one is seen. The output file can only be labelled with
   one link type, so mixing them would mislabel frames.
-- **No VLAN tags.** If the capture host saw the stream on a tagged trunk, the
-  packets are skipped.
 - **No IP reassembly.** If the router's TZSP datagrams were fragmented, the
   first fragment is written truncated and the remaining fragments are skipped.
 

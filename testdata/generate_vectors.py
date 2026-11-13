@@ -55,6 +55,11 @@ def ether(payload: bytes, ethertype: int) -> bytes:
             + ethertype.to_bytes(2, 'big') + payload)
 
 
+def vlan(vid: int, inner_ethertype: int) -> bytes:
+    '''A VLAN tag's TCI (priority 0) followed by the next ethertype.'''
+    return vid.to_bytes(2, 'big') + inner_ethertype.to_bytes(2, 'big')
+
+
 def ok(frame: bytes = INNER, encap: int = 1) -> str:
     return f'{encap}:{frame.hex()}'
 
@@ -91,8 +96,17 @@ CASES = [
     ('ipv6_truncated', 'strip_frame', PORT, ether(b'\x60' * 39, 0x86DD), REJECT),
     ('ethernet_truncated', 'strip_frame', PORT, bytes(13), REJECT),
     ('arp_ethertype', 'strip_frame', PORT, ether(bytes(28), 0x0806), REJECT),
-    ('vlan_tagged_unsupported', 'strip_frame', PORT,
-     ether(b'\x00\x0a\x08\x00' + ipv4(udp(tzsp())), 0x8100), REJECT),
+    ('vlan_8021q_ipv4', 'strip_frame', PORT,
+     ether(vlan(10, 0x0800) + ipv4(udp(tzsp())), 0x8100), ok()),
+    ('vlan_8021q_ipv6', 'strip_frame', PORT,
+     ether(vlan(4094, 0x86DD) + ipv6(udp(tzsp())), 0x8100), ok()),
+    ('vlan_qinq_8021ad', 'strip_frame', PORT,
+     ether(vlan(100, 0x8100) + vlan(10, 0x0800) + ipv4(udp(tzsp())), 0x88A8), ok()),
+    ('vlan_qinq_9100', 'strip_frame', PORT,
+     ether(vlan(100, 0x8100) + vlan(10, 0x86DD) + ipv6(udp(tzsp())), 0x9100), ok()),
+    ('vlan_then_arp', 'strip_frame', PORT, ether(vlan(10, 0x0806) + bytes(28), 0x8100), REJECT),
+    ('vlan_tag_truncated', 'strip_frame', PORT, ether(b'\x00\x0a\x08', 0x8100), REJECT),
+    ('vlan_tag_without_ethertype', 'strip_frame', PORT, ether(b'\x00\x0a', 0x8100), REJECT),
     ('udp_header_truncated', 'strip_frame', PORT, ether(ipv4(b'\xc0\x00\x90'), 0x0800), REJECT),
     ('malformed_tzsp_in_valid_frame', 'strip_frame', PORT,
      ether(ipv4(udp(b'\x01\x00\x00\x01\x00\x00')), 0x0800), REJECT),

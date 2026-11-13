@@ -14,7 +14,8 @@ so it doesn't build scapy layer objects for every packet.
 For each packet in the input file it:
 
 1. Checks for an Ethernet frame with ethertype IPv4 (`0x0800`) or IPv6
-   (`0x86DD`).
+   (`0x86DD`), skipping any VLAN tags in front of it (802.1Q `0x8100`, and
+   QinQ with an outer `0x88A8` or `0x9100` tag).
 2. Checks that the IP protocol (IPv6: Next Header) is UDP and the destination port matches
    `--port`.
 3. Walks the TZSP header's tag list, handling the zero-length PADDING and END
@@ -113,6 +114,5 @@ uv run python -m unittest discover -s tests
 
 - Output timestamps have microsecond resolution, and are converted through a
   float on the way. Nanosecond detail in the input is lost.
-- No IPv6 extension headers, Ethernet only, no VLAN tags, no IP
-  reassembly. See the
+- No IPv6 extension headers, Ethernet only, no IP reassembly. See the
   [parent README](../README.md#shared-limitations).

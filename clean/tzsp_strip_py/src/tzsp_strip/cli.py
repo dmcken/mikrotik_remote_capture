@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 ETHER_LEN = 14
 ETHERTYPE_IPV4 = 0x0800
 ETHERTYPE_IPV6 = 0x86DD
+# Ethertypes (TPIDs) that introduce a VLAN tag: 802.1Q, 802.1ad (QinQ outer
+# tag) and the pre-standard 0x9100 some switches use for QinQ.
+VLAN_TPIDS = (0x8100, 0x88A8, 0x9100)
 IPV4_MIN_LEN = 20
 IPV6_LEN = 40
 IPPROTO_UDP = 17
@@ -98,7 +101,8 @@ def strip_tzsp(data: bytes, tzsp_port: int) -> tuple[int, bytes] | None:
     '''Strip TZSP/UDP/IP/Ethernet headers from a raw captured frame.
 
     Python port of strip_frame() in the Rust tzsp crate. Handles TZSP
-    carried over either IPv4 or IPv6. On success returns
+    carried over either IPv4 or IPv6, optionally inside any number of
+    VLAN tags (802.1Q, 802.1ad/QinQ). On success returns
     (encapsulation, inner_frame), where encapsulation is the TZSP
     encapsulation type (1 = Ethernet, 18 = 802.11, ...) that callers
     must check before writing the frame. Returns None
@@ -113,8 +117,15 @@ def strip_tzsp(data: bytes, tzsp_port: int) -> tuple[int, bytes] | None:
     # ----------------------------
     # Ethernet + IP
     # ----------------------------
-    ether_type = _read_u16(data, 12)
-    ip = data[ETHER_LEN:]
+    # Skip any VLAN tags (4 bytes each: TPID, then TCI) to reach the
+    # real ethertype.
+    ether_type_at = 12
+    while _read_u16(data, ether_type_at) in VLAN_TPIDS:
+        ether_type_at += 4
+        if len(data) < ether_type_at + 2:
+            return None
+    ether_type = _read_u16(data, ether_type_at)
+    ip = data[ether_type_at + 2:]
 
     if ether_type == ETHERTYPE_IPV4:
         if len(ip) < IPV4_MIN_LEN:

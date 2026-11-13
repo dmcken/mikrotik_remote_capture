@@ -17,8 +17,9 @@
 //!
 //! [`pcap::PcapWriter`] writes the tools' output files.
 //!
-//! `clean/tzsp_strip_py/main.py` is a Python port of this module. Both are
-//! checked against the shared cases in `testdata/tzsp_vectors.tsv`.
+//! `clean/tzsp_strip_py/src/tzsp_strip/cli.py` is a Python port of this
+//! module. Both are checked against the shared cases in
+//! `testdata/tzsp_vectors.tsv`.
 
 pub mod pcap;
 
@@ -31,6 +32,9 @@ pub const ENCAP_ETHERNET: u16 = 1;
 const ETHER_LEN: usize = 14;
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const ETHERTYPE_IPV6: u16 = 0x86DD;
+/// Ethertypes (TPIDs) that introduce a VLAN tag: 802.1Q, 802.1ad (QinQ
+/// outer tag) and the pre-standard 0x9100 some switches use for QinQ.
+const VLAN_TPIDS: [u16; 3] = [0x8100, 0x88A8, 0x9100];
 const IPV4_MIN_LEN: usize = 20;
 const IPV6_LEN: usize = 40;
 const IPPROTO_UDP: u8 = 17;
@@ -117,7 +121,8 @@ pub fn strip(tzsp: &[u8]) -> Option<(u16, &[u8])> {
 
 /// Strip the Ethernet/IP/UDP/TZSP wrapper from a captured Ethernet frame.
 ///
-/// Accepts TZSP over IPv4 or IPv6 sent to UDP port `port`. For IPv6, UDP must
+/// Accepts TZSP over IPv4 or IPv6 sent to UDP port `port`, optionally inside
+/// any number of VLAN tags (802.1Q, 802.1ad/QinQ). For IPv6, UDP must
 /// directly follow the IPv6 header; extension headers aren't walked. Returns
 /// the same as [`strip`], or `None` (never the still-wrapped frame) if any
 /// layer doesn't match. Callers should drop those rather than writing them
@@ -128,8 +133,18 @@ pub fn strip_frame(data: &[u8], port: u16) -> Option<(u16, &[u8])> {
         return None;
     }
 
-    let ip = &data[ETHER_LEN..];
-    let udp = match read_u16(&data[12..14]) {
+    // Skip any VLAN tags (4 bytes each: TPID, then TCI) to reach the real
+    // ethertype.
+    let mut ethertype_at = 12;
+    while VLAN_TPIDS.contains(&read_u16(&data[ethertype_at..ethertype_at + 2])) {
+        ethertype_at += 4;
+        if data.len() < ethertype_at + 2 {
+            return None;
+        }
+    }
+
+    let ip = &data[ethertype_at + 2..];
+    let udp = match read_u16(&data[ethertype_at..ethertype_at + 2]) {
         ETHERTYPE_IPV4 => {
             if ip.len() < IPV4_MIN_LEN {
                 return None;
