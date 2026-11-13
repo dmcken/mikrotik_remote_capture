@@ -1,4 +1,6 @@
-# Run the Rust and Python tests on every push and pull request.
+# Run the Rust and Python tests on every push to this repo, and on pull
+# requests from forks. A PR from a branch of this repo already gets a run
+# from the push, so the pull_request run is skipped for it.
 name: CI
 
 on:
@@ -11,6 +13,7 @@ permissions:
 
 jobs:
   rust:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -19,6 +22,7 @@ jobs:
       - run: cargo test --workspace --locked
 
   python:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     defaults:
       run:
