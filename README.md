@@ -1,8 +1,5 @@
 # Mikrotik Remote Capture
 
-Mikrotik Remote packet capture
-
-
 Problem definition: Mikrotik routers have a streaming packet capture feature (see below)
 
 Via winbox:
