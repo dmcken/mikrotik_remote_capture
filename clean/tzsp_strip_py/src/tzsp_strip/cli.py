@@ -12,6 +12,7 @@ import sys
 import scapy.utils
 
 from tzsp_strip import ip
+from tzsp_strip.reassembly import FRAGMENT, Reassembler
 from tzsp_strip.ip import read_u16 as _read_u16
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,10 @@ def main() -> None:
     # been checked, so a rejected input doesn't leave an empty output
     # file behind.
     output_file = None
+    # Reassembles TZSP datagrams the router's packets were fragmented into
+    # on the way to the capture host. Written frames get the timestamp of
+    # the fragment that completed them.
+    reassembler = Reassembler(lambda udp: strip_udp(udp, args.port))
     count = 0
     skipped = 0
     non_ethernet = 0
@@ -229,7 +234,10 @@ def main() -> None:
                 if output_file is None:
                     output_file = _open_output(args.output)
 
-                result = strip_tzsp(pkt_bytes, args.port)
+                result = reassembler.push(pkt_time or 0.0, pkt_bytes)
+                if result == FRAGMENT:
+                    # Held until the rest of its datagram arrives.
+                    continue
                 if result is None:
                     skipped += 1
                     continue
@@ -260,8 +268,10 @@ def main() -> None:
         # output file rather than nothing.
         _open_output(args.output).close()
 
+    reassembled, incomplete = reassembler.finish()
     logger.info(f"Completed processing {count:,} packets ({skipped:,} skipped, not TZSP/unparseable; "
-                f"{non_ethernet:,} skipped, non-Ethernet encapsulation)")
+                f"{non_ethernet:,} skipped, non-Ethernet encapsulation; fragmented datagrams: "
+                f"{reassembled:,} reassembled, {incomplete:,} incomplete (dropped))")
 
 if __name__ == '__main__':
     main()

@@ -29,13 +29,17 @@ full-size frames (1514 bytes) produce TZSP datagrams over a 1500-byte MTU.
       datagrams.
 - [ ] **Same, IPv6 stream.** As above, over an IPv6 `streaming-server`.
 - [ ] **Same traffic captured with tshark, then run through both
-      strippers.** Expect the limitation documented in
-      [clean/README.md](clean/README.md#shared-limitations): large frames
-      skipped. Confirms how
-      RouterOS fragments (or whether it sets DF and drops instead, which
-      would show as missing large frames in `tzsp_ng_capture` too).
+      strippers.** Expect full 1514-byte frames, a non-zero `reassembled`
+      count and `incomplete` at or near 0. Compare against a
+      `tzsp_ng_capture` run of the same traffic: frame counts should be close.
+      Also confirms how RouterOS fragments (or whether it sets DF and drops
+      instead, which would show as missing large frames in both).
+- [ ] **Over a tunnel** (lower MTU, so mid-size frames fragment too, possibly
+      into three or more pieces). Same expectations.
+- [ ] **A lossy path.** If any link drops packets, `incomplete` should rise
+      roughly in line with the loss; frames are never written truncated.
 - [ ] **Path MTU raised to 1600+ between router and capture host.** Expect
-      no fragmentation and full frames from the strippers too.
+      `reassembled` to stay at 0.
 
 ### IPv6 extension headers
 

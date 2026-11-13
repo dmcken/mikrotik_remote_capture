@@ -26,18 +26,16 @@ being written still wrapped.
 
 ### Shared limitations
 
-- **No IP reassembly: large frames get lost.** The router adds IP + UDP +
-  TZSP headers (33 bytes over IPv4, 53 over IPv6) to every sniffed frame, so
-  any frame bigger than about 1,467 bytes (IPv4) or 1,447 bytes (IPv6) doesn't
-  fit a 1500-byte MTU, and the router fragments the TZSP datagram. On busy
-  links that is every full-size packet. The strippers skip every fragment,
-  over both IPv4 and IPv6, so those frames are missing from the output.
-
-  To avoid this, either use [`tzsp_ng_capture`](../tzsp_ng_capture/README.md),
-  where the kernel reassembles the datagrams before the tool sees them, or
-  raise the MTU along the whole path from the router to the capture host to
-  at least 1,600 so nothing is fragmented. The `skipped` count rises when it
-  happens.
+- **Fragments missing from the capture lose the frame.** The router adds IP +
+  UDP + TZSP headers (33 bytes over IPv4, 53 over IPv6) to every sniffed
+  frame, so frames over about 1,467 bytes (IPv4) or 1,447 bytes (IPv6), or
+  smaller ones over tunnels, arrive as IP fragments. Both tools reassemble
+  them (see
+  [tzsp_strip_rs](tzsp_strip_rs/README.md#fragmented-datagrams) for the
+  rules), but a frame with any fragment missing from the capture can't be
+  recovered, and is counted as `incomplete`. If that count is high, check for
+  loss between the router and the capture host, or raise the MTU on that path
+  to at least 1,600 so nothing is fragmented.
 - **IPv6 extension headers: ESP isn't supported.** Hop-by-Hop, Routing
   (including SRv6), Destination Options, AH and Fragment headers before the
   UDP header are walked. RouterOS doesn't add any of these itself; they only

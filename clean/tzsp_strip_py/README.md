@@ -23,6 +23,12 @@ For each packet in the input file it:
 4. Writes everything after the TZSP header to the output, keeping the original
    timestamp.
 
+TZSP datagrams that the router's packets were IP-fragmented into on the way
+are reassembled first (IPv4 and IPv6, fragments in any order), using the same
+rules as [`tzsp_strip_rs`](../tzsp_strip_rs/README.md#fragmented-datagrams).
+The frame gets the timestamp of the fragment that completed it. Datagrams
+that never complete are counted as `incomplete`.
+
 Packets that fail any of these checks are skipped and counted. Packets whose
 TZSP header says they carry something other than Ethernet (e.g. 802.11) are
 skipped and counted separately, with a warning when the first one is seen.
@@ -67,7 +73,8 @@ uv sync
 uv run tzsp-strip raw.pcapng clean.pcapng
 ```
 
-The code is in `src/tzsp_strip/cli.py`. `uv run` always uses the working
+The code is in `src/tzsp_strip/`: `cli.py` (file handling and TZSP), `ip.py`
+(Ethernet/VLAN/IP parsing) and `reassembly.py` (fragments). `uv run` always uses the working
 copy, so edits take effect without reinstalling.
 
 ## Usage
@@ -96,7 +103,7 @@ Progress is logged every 100,000 packets, followed by a summary:
 ```
 ... - INFO - 100,000
 ... - INFO - 200,000
-... - INFO - Completed processing 245,312 packets (17 skipped, not TZSP/unparseable; 0 skipped, non-Ethernet encapsulation)
+... - INFO - Completed processing 245,312 packets (17 skipped, not TZSP/unparseable; 0 skipped, non-Ethernet encapsulation; fragmented datagrams: 3,120 reassembled, 2 incomplete (dropped))
 ```
 
 ## Tests
@@ -117,11 +124,5 @@ uv run python -m unittest discover -s tests
   float on the way, so nanosecond detail in the input is lost. Use
   [`tzsp_strip_rs`](../tzsp_strip_rs/README.md), which keeps nanoseconds, if
   you need it.
-- **No IP reassembly.** Frames over about 1,467 bytes (IPv4 transport) or
-  1,447 bytes (IPv6) make the router fragment the TZSP datagram, and the
-  fragments are skipped. Use
-  [`tzsp_ng_capture`](../../tzsp_ng_capture/README.md), or raise the MTU
-  between the router and the capture host, if the traffic has full-size
-  packets.
 - No IPv6 ESP, Ethernet only. See the
   [parent README](../README.md#shared-limitations).
