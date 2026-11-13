@@ -17,7 +17,7 @@ To capture and strip in one step instead, see
 | Tool | Input | Output | Notes |
 |------|-------|--------|-------|
 | [`tzsp_strip_rs`](tzsp_strip_rs/README.md) | pcap or pcapng | pcap (ns timestamps) | Fastest. Pure Rust, no libpcap. |
-| [`tzsp_strip_py`](tzsp_strip_py/README.md) | pcap or pcapng | pcapng | Easiest to modify. Runs with `uvx`, no build step. |
+| [`tzsp_strip_py`](tzsp_strip_py/README.md) | pcap or pcapng | pcapng (µs timestamps) | Easiest to modify. Runs with `uvx`, no build step. |
 
 Both tools parse each packet (Ethernet → optional VLAN tags → IPv4 or IPv6 →
 UDP → TZSP, including TZSP tagged fields) and only write the inner frame.
@@ -26,8 +26,24 @@ being written still wrapped.
 
 ### Shared limitations
 
-- **No IPv6 extension headers.** TZSP over IPv4 and IPv6 are both handled, but
-  for IPv6, UDP must directly follow the IPv6 header.
+- **No IP reassembly: large frames get lost.** The router adds IP + UDP +
+  TZSP headers (33 bytes over IPv4, 53 over IPv6) to every sniffed frame, so
+  any frame bigger than about 1,467 bytes (IPv4) or 1,447 bytes (IPv6) doesn't
+  fit a 1500-byte MTU, and the router fragments the TZSP datagram. On busy
+  links that is every full-size packet. In a capture file, the strippers then:
+  - **IPv4 transport:** write the first fragment's part of the frame,
+    truncated, and skip the remaining fragments.
+  - **IPv6 transport:** skip the whole frame, since the fragments carry an
+    IPv6 Fragment extension header (see below).
+
+  To avoid this, either use [`tzsp_ng_capture`](../tzsp_ng_capture/README.md),
+  where the kernel reassembles the datagrams before the tool sees them, or
+  raise the MTU along the whole path from the router to the capture host to
+  at least 1,600 so nothing is fragmented. The `skipped` count rises when it
+  happens.
+- **No IPv6 extension headers.** For IPv6 transport, UDP must directly follow
+  the IPv6 header. RouterOS doesn't add extension headers to the stream, so in
+  practice the only one seen is the Fragment header above.
 - **Ethernet only.** The input must use the Ethernet link type. Anything else,
   such as a capture taken with `tshark -i any` (Linux cooked/SLL framing), is
   rejected at startup with an error, not silently skipped.
@@ -36,8 +52,6 @@ being written still wrapped.
   sniffing a wireless interface, are skipped and counted separately, with a
   warning when the first one is seen. The output file can only be labelled with
   one link type, so mixing them would mislabel frames.
-- **No IP reassembly.** If the router's TZSP datagrams were fragmented, the
-  first fragment is written truncated and the remaining fragments are skipped.
 
 ## Using rust
 

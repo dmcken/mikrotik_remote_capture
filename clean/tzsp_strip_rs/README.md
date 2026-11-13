@@ -107,5 +107,11 @@ cargo run --release -p tzsp_strip_rs -- raw.pcapng clean.pcap
 
 ## Limitations
 
-- No IPv6 extension headers, Ethernet only, no IP reassembly. See the
+- **No IP reassembly.** Frames over about 1,467 bytes (IPv4 transport) or
+  1,447 bytes (IPv6) make the router fragment the TZSP datagram. Over IPv4
+  the frame is written truncated; over IPv6 it is skipped. Use
+  [`tzsp_ng_capture`](../../tzsp_ng_capture/README.md), or raise the MTU
+  between the router and the capture host, if the traffic has full-size
+  packets.
+- No IPv6 extension headers, Ethernet only. See the
   [parent README](../README.md#shared-limitations).

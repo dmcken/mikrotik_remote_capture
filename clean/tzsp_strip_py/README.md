@@ -112,7 +112,16 @@ uv run python -m unittest discover -s tests
 
 ## Limitations
 
-- Output timestamps have microsecond resolution, and are converted through a
-  float on the way. Nanosecond detail in the input is lost.
-- No IPv6 extension headers, Ethernet only, no IP reassembly. See the
+- **Microsecond timestamps.** Output timestamps have microsecond resolution
+  (scapy's pcapng writer is fixed at microseconds) and are converted through a
+  float on the way, so nanosecond detail in the input is lost. Use
+  [`tzsp_strip_rs`](../tzsp_strip_rs/README.md), which keeps nanoseconds, if
+  you need it.
+- **No IP reassembly.** Frames over about 1,467 bytes (IPv4 transport) or
+  1,447 bytes (IPv6) make the router fragment the TZSP datagram. Over IPv4
+  the frame is written truncated; over IPv6 it is skipped. Use
+  [`tzsp_ng_capture`](../../tzsp_ng_capture/README.md), or raise the MTU
+  between the router and the capture host, if the traffic has full-size
+  packets.
+- No IPv6 extension headers, Ethernet only. See the
   [parent README](../README.md#shared-limitations).
