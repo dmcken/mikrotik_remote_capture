@@ -1,34 +1,98 @@
 // TZSP capture and stripper
+//
+// Receives a MikroTik sniffer stream (TZSP over UDP) on an ordinary UDP
+// socket, strips the TZSP header from each datagram and writes the
+// encapsulated frames to size-rotated pcap files. The kernel handles
+// IPv4/IPv6, fragment reassembly and port matching, so no libpcap, raw
+// sockets or root privileges are needed.
 
 //  Standard
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufWriter, IoSliceMut, Write};
+use std::net::{IpAddr, SocketAddr};
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::path::Path;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // External
 use clap::Parser;
-use pcap::{Capture, Device, Linktype};
+use nix::errno::Errno;
+use nix::sys::socket::{
+    recvmsg, setsockopt, sockopt, ControlMessageOwned, MsgFlags,
+};
+use nix::sys::time::TimeSpec;
+use socket2::{Domain, Protocol, Socket, Type};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
-    /// Network interface to capture from
-    #[arg(short, long)]
-    interface: String,
+    /// Local IP address to listen on; the default "::" accepts both IPv4 and IPv6
+    #[arg(short, long, default_value = "::")]
+    listen: IpAddr,
+
+    /// UDP port the router streams TZSP to
+    #[arg(short, long, default_value_t = 37008)]
+    port: u16,
 
     /// File size at which to rotate, e.g. 500MB, 1GB (binary units)
     #[arg(short, long, default_value = "1GB")]
     max_size: String,
 
-    /// Optional output filename
-    #[arg(short, long, default_value="capture")]
+    /// Prefix for output files: <PREFIX>_<unix-timestamp>.pcap
+    #[arg(short, long, default_value = "capture")]
     output_prefix: String,
+
+    /// No longer used (kept only to give a helpful error)
+    #[arg(short, long, hide = true)]
+    interface: Option<String>,
 }
 
+/// Requested socket receive buffer. The kernel may cap it at
+/// net.core.rmem_max; the effective size is printed at startup.
+const RECV_BUFFER_BYTES: usize = 8 << 20;
+
+/// Largest possible UDP payload; also the output snaplen.
+const MAX_DATAGRAM: usize = 65535;
+
+// Classic pcap format with nanosecond timestamps: a 24-byte file
+// header, then a 16-byte record header plus the data for each packet.
+// See https://www.tcpdump.org/manpages/pcap-savefile.5.html
+const PCAP_FILE_HEADER_LEN: u64 = 24;
+const PCAP_RECORD_HEADER_LEN: u64 = 16;
+const PCAP_MAGIC_NANOSECOND: u32 = 0xa1b2_3c4d;
+const LINKTYPE_ETHERNET: u32 = 1;
+
+/// The 24-byte pcap file header (native byte order, as readers detect
+/// it from the magic number).
+fn pcap_file_header() -> Vec<u8> {
+    let mut h = Vec::with_capacity(PCAP_FILE_HEADER_LEN as usize);
+    h.extend_from_slice(&PCAP_MAGIC_NANOSECOND.to_ne_bytes());
+    h.extend_from_slice(&2u16.to_ne_bytes()); // version major
+    h.extend_from_slice(&4u16.to_ne_bytes()); // version minor
+    h.extend_from_slice(&0i32.to_ne_bytes()); // thiszone (unused)
+    h.extend_from_slice(&0u32.to_ne_bytes()); // sigfigs (unused)
+    h.extend_from_slice(&(MAX_DATAGRAM as u32).to_ne_bytes()); // snaplen
+    h.extend_from_slice(&LINKTYPE_ETHERNET.to_ne_bytes());
+    h
+}
+
+/// The 16-byte record header for one packet.
+fn pcap_record_header(timestamp: Duration, len: usize) -> [u8; 16] {
+    let mut h = [0u8; 16];
+    h[0..4].copy_from_slice(&(timestamp.as_secs() as u32).to_ne_bytes());
+    h[4..8].copy_from_slice(&timestamp.subsec_nanos().to_ne_bytes());
+    h[8..12].copy_from_slice(&(len as u32).to_ne_bytes()); // captured length
+    h[12..16].copy_from_slice(&(len as u32).to_ne_bytes()); // original length
+    h
+}
+
+/// TZSP encapsulation value for Ethernet frames -- the only one this
+/// tool writes, since the output file is labelled as Ethernet.
+const TZSP_ENCAP_ETHERNET: u16 = 1;
 
 fn read_u16(buf: &[u8]) -> u16 {
     ((buf[0] as u16) << 8) | (buf[1] as u16)
@@ -76,87 +140,13 @@ fn parse_tzsp_header(buf: &[u8]) -> Option<usize> {
     None
 }
 
-/// TZSP encapsulation value for Ethernet frames -- the only one these
-/// tools write, since the output file is labelled as Ethernet.
-const TZSP_ENCAP_ETHERNET: u16 = 1;
-
-/// Strip TZSP headers from a packet, if present.
+/// Strip the TZSP header from a received datagram.
 ///
 /// On success returns the TZSP encapsulation type (bytes 2-3 of the
-/// TZSP header, e.g. 1 = Ethernet, 18 = 802.11) and the inner frame;
-/// callers must check the encapsulation before writing the frame.
-///
-/// Returns `None` (never the original, still-wrapped packet) whenever
-/// the frame isn't a recognisable Ethernet/IPv4-or-IPv6/UDP/TZSP
-/// packet on port 37008, or its TZSP header can't be walked cleanly --
-/// callers drop these rather than writing them through to the
-/// "cleaned" capture, which would otherwise silently reintroduce the
-/// TZSP/IP/Ethernet wrapper for exactly the packets most likely to
-/// confuse downstream analysis.
-fn strip_tzsp(data: &[u8]) -> Option<(u16, &[u8])> {
-    const ETHER_LEN: usize = 14;
-    const ETHERTYPE_IPV4: u16 = 0x0800;
-    const ETHERTYPE_IPV6: u16 = 0x86DD;
-    const IPV4_MIN_LEN: usize = 20;
-    const IPV6_LEN: usize = 40;
-    const IPPROTO_UDP: u8 = 17;
-    const UDP_PORT_TZSP: u16 = 37008;
-
-    if data.len() < ETHER_LEN {
-        return None;
-    }
-
-    // ----------------------------
-    // Ethernet + IP
-    // ----------------------------
-    let ip = &data[ETHER_LEN..];
-    let udp = match read_u16(&data[12..14]) {
-        ETHERTYPE_IPV4 => {
-            if ip.len() < IPV4_MIN_LEN {
-                return None;
-            }
-            let ihl = (ip[0] & 0x0F) as usize * 4;
-            if ihl < IPV4_MIN_LEN || ip.len() < ihl {
-                return None;
-            }
-            if ip[9] != IPPROTO_UDP {
-                return None;
-            }
-            &ip[ihl..]
-        }
-        ETHERTYPE_IPV6 => {
-            if ip.len() < IPV6_LEN {
-                return None;
-            }
-            // Next Header must be UDP directly. Extension headers
-            // (hop-by-hop, routing, fragment, ...) aren't walked; a
-            // TZSP stream shouldn't normally carry any, so packets
-            // with them are dropped as unstrippable.
-            if ip[6] != IPPROTO_UDP {
-                return None;
-            }
-            &ip[IPV6_LEN..]
-        }
-        _ => return None,
-    };
-
-    // ----------------------------
-    // UDP
-    // ----------------------------
-    if udp.len() < 8 {
-        return None;
-    }
-
-    let dst_port = read_u16(&udp[2..4]);
-    if dst_port != UDP_PORT_TZSP {
-        return None;
-    }
-
-    // ----------------------------
-    // TZSP
-    // ----------------------------
-    let tzsp = &udp[8..];
-
+/// header, e.g. 1 = Ethernet, 18 = 802.11) and the encapsulated frame.
+/// Returns `None` if the header can't be walked cleanly or carries no
+/// frame (e.g. keepalives).
+fn strip_tzsp(tzsp: &[u8]) -> Option<(u16, &[u8])> {
     let tzsp_hdr_len = parse_tzsp_header(tzsp)?;
 
     if tzsp_hdr_len >= tzsp.len() {
@@ -212,27 +202,120 @@ fn parse_size(input: &str) -> Result<u64, String> {
     Ok(bytes)
 }
 
-/// Pick a `<prefix>_<secs>.pcap` name that `exists` says is free,
-/// falling back to `<prefix>_<secs>_1.pcap`, `_2`, ... -- so two
-/// rotations within the same second (or a file left over from an
-/// earlier run) never get silently overwritten.
-fn unique_filename(prefix: &str, secs: u64, exists: impl Fn(&str) -> bool) -> String {
-    let mut candidate = format!("{}_{}.pcap", prefix, secs);
-    let mut n: u64 = 1;
-    while exists(&candidate) {
-        candidate = format!("{}_{}_{}.pcap", prefix, secs, n);
-        n += 1;
+/// Output file name for a given rotation time; `n` > 0 adds a `_<n>`
+/// suffix, used when the plain name is already taken.
+fn candidate_filename(prefix: &str, secs: u64, n: u64) -> String {
+    if n == 0 {
+        format!("{}_{}.pcap", prefix, secs)
+    } else {
+        format!("{}_{}_{}.pcap", prefix, secs, n)
     }
-    candidate
 }
 
-/// Generate a timestamped, not-yet-existing file name for rotation
-fn generate_filename(prefix: &str) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    unique_filename(prefix, now, |p| Path::new(p).exists())
+/// Create a new, timestamped output file. Uses `create_new`, so an
+/// existing file (two rotations within the same second, or a file
+/// left over from an earlier run) is never overwritten: the next free
+/// `_1`, `_2`, ... name is used instead.
+fn create_output_file(prefix: &str, secs: u64) -> io::Result<(String, File)> {
+    let mut n = 0;
+    loop {
+        let name = candidate_filename(prefix, secs, n);
+        match OpenOptions::new().write(true).create_new(true).open(&name) {
+            Ok(file) => return Ok((name, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// The pcap file currently being written.
+struct Output {
+    name: String,
+    writer: BufWriter<File>,
+    /// Bytes on disk once buffered data is flushed.
+    size: u64,
+}
+
+impl Output {
+    fn create(prefix: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let (name, file) = create_output_file(prefix, secs)
+            .map_err(|e| format!("Can't create output file for prefix '{}': {}", prefix, e))?;
+        let mut writer = BufWriter::new(file);
+        writer.write_all(&pcap_file_header())?;
+        Ok(Output { name, writer, size: PCAP_FILE_HEADER_LEN })
+    }
+
+    fn write(&mut self, timestamp: Duration, frame: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        self.writer.write_all(&pcap_record_header(timestamp, frame.len()))?;
+        self.writer.write_all(frame)?;
+        self.size += PCAP_RECORD_HEADER_LEN + frame.len() as u64;
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+/// One received datagram.
+struct Received {
+    len: usize,
+    /// Datagram was larger than the buffer (can't happen with a
+    /// 64 KiB buffer, but checked rather than assumed).
+    truncated: bool,
+    /// Kernel receive timestamp (SO_TIMESTAMPNS).
+    timestamp: Option<Duration>,
+    /// Cumulative datagrams dropped by the kernel because the socket
+    /// buffer was full (SO_RXQ_OVFL).
+    dropped: Option<u32>,
+}
+
+fn receive(fd: RawFd, buf: &mut [u8], cmsg_buf: &mut Vec<u8>) -> nix::Result<Received> {
+    let mut iov = [IoSliceMut::new(buf)];
+    let msg = recvmsg::<()>(fd, &mut iov, Some(cmsg_buf), MsgFlags::empty())?;
+
+    let mut timestamp = None;
+    let mut dropped = None;
+    for cmsg in msg.cmsgs()? {
+        match cmsg {
+            ControlMessageOwned::ScmTimestampns(ts) => {
+                timestamp = Some(Duration::new(ts.tv_sec() as u64, ts.tv_nsec() as u32));
+            }
+            ControlMessageOwned::RxqOvfl(n) => dropped = Some(n),
+            _ => {}
+        }
+    }
+
+    Ok(Received {
+        len: msg.bytes,
+        truncated: msg.flags.contains(MsgFlags::MSG_TRUNC),
+        timestamp,
+        dropped,
+    })
+}
+
+/// Bind the receiving UDP socket. Binding to an IPv6 address (including
+/// the default "::") also accepts IPv4 via IPv4-mapped addresses.
+fn open_socket(listen: IpAddr, port: u16) -> Result<Socket, Box<dyn std::error::Error>> {
+    let addr = SocketAddr::new(listen, port);
+    let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(false)?;
+    }
+    socket
+        .bind(&addr.into())
+        .map_err(|e| format!("Can't listen on {}: {}", addr, e))?;
+
+    // Wake up at least once a second to check for Ctrl-C and flush.
+    socket.set_read_timeout(Some(Duration::from_secs(1)))?;
+    // A bigger buffer absorbs bursts while the disk is busy; failure
+    // here isn't fatal, the effective size is reported either way.
+    let _ = socket.set_recv_buffer_size(RECV_BUFFER_BYTES);
+
+    setsockopt(&socket, sockopt::ReceiveTimestampns, &true)?;
+    setsockopt(&socket, sockopt::RxqOvfl, &1)?;
+    Ok(socket)
 }
 
 /// Human-readable name for a TZSP encapsulation value.
@@ -246,79 +329,26 @@ fn tzsp_encap_name(encap: u16) -> &'static str {
     }
 }
 
-/// Error text for a capture interface that isn't Ethernet.
-fn non_ethernet_message(interface: &str, linktype: Linktype) -> String {
-    let name = linktype.get_name().unwrap_or_else(|_| "unknown".to_string());
-    let mut msg = format!(
-        "Interface '{}' has link type {} ({}); only Ethernet (1) is supported.",
-        interface, linktype.0, name,
-    );
-    // 113 = LINUX_SLL, 276 = LINUX_SLL2 (what the "any" device uses).
-    if linktype.0 == 113 || linktype.0 == 276 {
-        msg.push_str(" Capture on the specific interface that receives the TZSP stream instead of 'any'.");
-    }
-    msg
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-
     let args = Args::parse();
+
+    if args.interface.is_some() {
+        eprintln!(
+            "--interface is no longer used: the capture now listens on a UDP socket \
+             (port {} on all addresses by default). Use --listen <IP> to restrict it \
+             to one local address.",
+            args.port,
+        );
+        std::process::exit(2);
+    }
 
     // Size to grow to before rotating
     let max_file_size: u64 = parse_size(&args.max_size)?;
 
-    // Start device search
-    let devices = Device::list()?;
+    let socket = open_socket(args.listen, args.port)?;
+    let fd = socket.as_raw_fd();
 
-    let device = devices
-        .into_iter()
-        .find(|d| d.name == args.interface)
-        .ok_or_else(|| format!("Network interface '{}' not found", &args.interface))?;
-    // End device search
-
-
-    // Open capture socket. Blocking with a short read timeout (rather
-    // than non-blocking + a busy-spin loop below) -- the previous
-    // non-blocking setup meant the capture thread spun at ~100% CPU
-    // for the whole life of the capture, even when idle, which is
-    // wasteful for a capture meant to run for hours/days and can make
-    // the actual packet-drop risk below worse by starving the box.
-    let mut cap = Capture::from_device(device)
-        .unwrap_or_else(|e| {
-            eprintln!("Error creating capture on {}: {}", &args.interface, e);
-            std::process::exit(1);
-        })
-        .promisc(true)
-        .immediate_mode(true)
-        .snaplen(65535)
-        .timeout(1000)
-        .open()
-        .unwrap_or_else(|e| {
-            eprintln!("Error opening capture on {}: {}", &args.interface, e);
-            std::process::exit(1);
-        });
-
-    cap.filter("udp port 37008", true)?;
-
-    // End capture socket
-
-
-    // Start first output file
-
-    // The parser assumes Ethernet framing on the capture interface;
-    // anything else (e.g. Linux cooked capture on "any") would make
-    // every packet unstrippable, so refuse up front instead.
-    let capture_linktype = cap.get_datalink();
-    if capture_linktype != Linktype::ETHERNET {
-        eprintln!("{}", non_ethernet_message(&args.interface, capture_linktype));
-        std::process::exit(1);
-    }
-
-    // Dead capture for writing the output. Only Ethernet-encapsulated
-    // TZSP frames are written, so the output is Ethernet too.
-    let linktype = Linktype::ETHERNET;
-    let mut current_filename = generate_filename(&args.output_prefix);
-    let mut savefile = Capture::dead(linktype)?.savefile(&current_filename)?;
+    let mut output = Output::create(&args.output_prefix)?;
 
     // Start CTRL-C handler
     let running = Arc::new(AtomicBool::new(true));
@@ -330,109 +360,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     // End CTRL-C handler
 
-    println!("Capturing UDP packets on port 37008 on {}...", &args.interface);
-    // Bytes on disk in the current file: the pcap file header plus a
-    // record header and the data for each packet written.
-    const PCAP_FILE_HEADER_LEN: u64 = 24;
-    const PCAP_RECORD_HEADER_LEN: u64 = 16;
-    let mut current_file_size: u64 = PCAP_FILE_HEADER_LEN;
+    println!(
+        "Listening for TZSP on UDP {} (receive buffer {} bytes), writing {}",
+        SocketAddr::new(args.listen, args.port),
+        socket.recv_buffer_size().unwrap_or(0),
+        output.name,
+    );
+
+    let mut received: u64 = 0;
+    let mut written: u64 = 0;
     let mut unstrippable_count: u64 = 0;
     let mut unsupported_encap_count: u64 = 0;
+    let mut kernel_dropped: u32 = 0;
 
-    // Persistent capture errors (interface gone down/removed, etc.)
-    // would otherwise make next_packet() fail instantly in a tight
-    // loop, pinning a core and flooding stderr. Back off between
-    // retries, and give up once errors have persisted for a while.
+    let print_stats = |label: &str, received: u64, written: u64, unstrippable: u64, non_eth: u64, dropped: u32| {
+        println!(
+            "{}: received={} written={} kernel_dropped={} unstrippable={} non_ethernet_encap={}",
+            label, received, written, dropped, unstrippable, non_eth,
+        );
+    };
+
+    // Persistent receive errors would otherwise make recvmsg() fail
+    // instantly in a tight loop, pinning a core and flooding stderr.
+    // Back off between retries, and give up once errors have persisted
+    // for a while.
     const ERROR_RETRY_DELAY: Duration = Duration::from_secs(1);
     const MAX_CONSECUTIVE_ERRORS: u32 = 30;
     let mut consecutive_errors: u32 = 0;
-    let mut fatal_error: Option<pcap::Error> = None;
+    let mut fatal_error: Option<Errno> = None;
 
-    loop {
-        if !running.load(Ordering::SeqCst) {
-            break;
-        }
+    let mut buf = vec![0u8; MAX_DATAGRAM];
+    let mut cmsg_buf = nix::cmsg_space!(TimeSpec, u32);
 
-        match cap.next_packet() {
-            Ok(packet) => {
+    while running.load(Ordering::SeqCst) {
+        let datagram = match receive(fd, &mut buf, &mut cmsg_buf) {
+            Ok(d) => d,
+            Err(Errno::EAGAIN) | Err(Errno::EINTR) => {
+                // Read timeout (idle) or a signal: not an error. Flush
+                // so the file on disk stays current while idle.
                 consecutive_errors = 0;
-                match strip_tzsp(packet.data) {
-                    Some((TZSP_ENCAP_ETHERNET, stripped)) => {
-                        // Rotate *before* a write that would take the
-                        // file past --max-size, so files never exceed it
-                        // (unless one packet alone is bigger than the
-                        // limit, in which case it gets a file to itself).
-                        let record_len = PCAP_RECORD_HEADER_LEN + stripped.len() as u64;
-                        let rotated = current_file_size + record_len > max_file_size
-                            && current_file_size > PCAP_FILE_HEADER_LEN;
-                        if rotated {
-                            println!("Rotating file: {}", &current_filename);
-                            savefile.flush()?;
-                            current_filename = generate_filename(&args.output_prefix);
-                            savefile = Capture::dead(linktype)?.savefile(&current_filename)?;
-                            current_file_size = PCAP_FILE_HEADER_LEN;
-                        }
-
-                        // Calculate new packet header and write
-                        let mut new_header = *packet.header;
-                        new_header.caplen = stripped.len() as u32;
-                        new_header.len = stripped.len() as u32;
-
-                        savefile.write(&pcap::Packet {
-                            header: &new_header,
-                            data: stripped,
-                        });
-                        current_file_size += record_len;
-
-                        // libpcap's own drop counters (kernel/if buffer
-                        // overflow) -- the only way to know after the
-                        // fact whether a long capture actually missed
-                        // packets under load. Printed here, after the
-                        // write, since stats() needs `cap` again and
-                        // `stripped` borrows from the current packet.
-                        if rotated {
-                            if let Ok(stats) = cap.stats() {
-                                println!(
-                                    "Capture stats so far: received={} dropped={} if_dropped={}, unstrippable={}, non_ethernet_encap={}",
-                                    stats.received, stats.dropped, stats.if_dropped, unstrippable_count,
-                                    unsupported_encap_count,
-                                );
-                            }
-                        }
-                    }
-                    Some((encap, _)) => {
-                        // Valid TZSP, but carrying something other
-                        // than Ethernet (e.g. 802.11). Writing it into
-                        // an Ethernet-labelled file would mislabel it.
-                        if unsupported_encap_count == 0 {
-                            eprintln!(
-                                "Warning: skipping TZSP packets with non-Ethernet encapsulation {} ({}); only Ethernet (1) is supported",
-                                encap, tzsp_encap_name(encap),
-                            );
-                        }
-                        unsupported_encap_count += 1;
-                    }
-                    None => {
-                        // Not a strippable TZSP/UDP/IPv4/Ethernet
-                        // frame (shouldn't normally happen given the
-                        // "udp port 37008" capture filter, but if it
-                        // does, drop it rather than writing the raw,
-                        // still-wrapped packet into the "cleaned"
-                        // output -- see strip_tzsp()'s own docs.
-                        unstrippable_count += 1;
-                    }
-                }
-            }
-            Err(pcap::Error::TimeoutExpired) => {
-                // Just a periodic wakeup to re-check `running` --
-                // expected regularly while idle, not an error.
-                consecutive_errors = 0;
+                output.flush()?;
                 continue;
             }
             Err(e) => {
                 consecutive_errors += 1;
                 eprintln!(
-                    "Capture error ({}/{}): {}",
+                    "Receive error ({}/{}): {}",
                     consecutive_errors, MAX_CONSECUTIVE_ERRORS, e,
                 );
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
@@ -440,23 +413,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
                 thread::sleep(ERROR_RETRY_DELAY);
+                continue;
             }
+        };
+        consecutive_errors = 0;
+        received += 1;
+        if let Some(d) = datagram.dropped {
+            kernel_dropped = d;
         }
+
+        if datagram.truncated {
+            unstrippable_count += 1;
+            continue;
+        }
+
+        let frame = match strip_tzsp(&buf[..datagram.len]) {
+            Some((TZSP_ENCAP_ETHERNET, frame)) => frame,
+            Some((encap, _)) => {
+                // Valid TZSP, but carrying something other than
+                // Ethernet (e.g. 802.11). Writing it into an
+                // Ethernet-labelled file would mislabel it.
+                if unsupported_encap_count == 0 {
+                    eprintln!(
+                        "Warning: skipping TZSP packets with non-Ethernet encapsulation {} ({}); only Ethernet (1) is supported",
+                        encap, tzsp_encap_name(encap),
+                    );
+                }
+                unsupported_encap_count += 1;
+                continue;
+            }
+            None => {
+                // Not parseable as TZSP, or no frame inside (e.g. a
+                // keepalive). Anything can be sent to the port, so
+                // this is counted rather than written.
+                unstrippable_count += 1;
+                continue;
+            }
+        };
+
+        // Rotate *before* a write that would take the file past
+        // --max-size, so files never exceed it (unless one packet
+        // alone is bigger than the limit, in which case it gets a file
+        // to itself).
+        let record_len = PCAP_RECORD_HEADER_LEN + frame.len() as u64;
+        if output.size + record_len > max_file_size && output.size > PCAP_FILE_HEADER_LEN {
+            output.flush()?;
+            let next = Output::create(&args.output_prefix)?;
+            println!("Rotating file: {} -> {}", output.name, next.name);
+            output = next;
+            print_stats("Capture stats so far", received, written, unstrippable_count,
+                        unsupported_encap_count, kernel_dropped);
+        }
+
+        let timestamp = datagram
+            .timestamp
+            .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default());
+        output.write(timestamp, frame)?;
+        written += 1;
     }
 
-    savefile.flush()?;
-    if let Ok(stats) = cap.stats() {
-        println!(
-            "Final capture stats: received={} dropped={} if_dropped={}, unstrippable={}, non_ethernet_encap={}",
-            stats.received, stats.dropped, stats.if_dropped, unstrippable_count,
-            unsupported_encap_count,
-        );
-    }
+    output.flush()?;
+    print_stats("Final capture stats", received, written, unstrippable_count,
+                unsupported_encap_count, kernel_dropped);
 
     if let Some(e) = fatal_error {
         eprintln!(
-            "Giving up after {} consecutive capture errors (last: {}). Output so far is in {}",
-            MAX_CONSECUTIVE_ERRORS, e, current_filename,
+            "Giving up after {} consecutive receive errors (last: {}). Output so far is in {}",
+            MAX_CONSECUTIVE_ERRORS, e, output.name,
         );
         std::process::exit(1);
     }
@@ -469,12 +492,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
-    /// TZSP header (version 1, type 0 "received", encap 1 Ethernet)
+    /// TZSP header (version 1, type 0 "received", given encapsulation)
     /// with a PADDING tag then END, followed by the inner frame.
-    fn tzsp_payload(inner: &[u8]) -> Vec<u8> {
-        tzsp_payload_encap(TZSP_ENCAP_ETHERNET, inner)
-    }
-
     fn tzsp_payload_encap(encap: u16, inner: &[u8]) -> Vec<u8> {
         let mut v = vec![0x01, 0x00];
         v.extend_from_slice(&encap.to_be_bytes());
@@ -483,109 +502,63 @@ mod tests {
         v
     }
 
-    fn udp(dst_port: u16, payload: &[u8]) -> Vec<u8> {
-        let len = (8 + payload.len()) as u16;
-        let mut v = vec![0xC0, 0x00];
-        v.extend_from_slice(&dst_port.to_be_bytes());
-        v.extend_from_slice(&len.to_be_bytes());
-        v.extend_from_slice(&[0, 0]);
-        v.extend_from_slice(payload);
-        v
-    }
-
-    fn ether(ethertype: u16, payload: &[u8]) -> Vec<u8> {
-        let mut v = vec![0u8; 12];
-        v.extend_from_slice(&ethertype.to_be_bytes());
-        v.extend_from_slice(payload);
-        v
-    }
-
-    fn ipv4(proto: u8, payload: &[u8]) -> Vec<u8> {
-        let mut v = vec![0u8; 20];
-        v[0] = 0x45;
-        v[9] = proto;
-        v.extend_from_slice(payload);
-        v
-    }
-
-    fn ipv6(next_header: u8, payload: &[u8]) -> Vec<u8> {
-        let mut v = vec![0u8; 40];
-        v[0] = 0x60;
-        v[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
-        v[6] = next_header;
-        v.extend_from_slice(payload);
-        v
-    }
-
     const INNER: &[u8] = b"inner ethernet frame";
 
     #[test]
-    fn strips_ipv4() {
-        let pkt = ether(0x0800, &ipv4(17, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), Some((TZSP_ENCAP_ETHERNET, INNER)));
+    fn strips_ethernet_payload() {
+        let d = tzsp_payload_encap(TZSP_ENCAP_ETHERNET, INNER);
+        assert_eq!(strip_tzsp(&d), Some((TZSP_ENCAP_ETHERNET, INNER)));
     }
 
     #[test]
-    fn strips_ipv6() {
-        let pkt = ether(0x86DD, &ipv6(17, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), Some((TZSP_ENCAP_ETHERNET, INNER)));
-    }
-
-    #[test]
-    fn rejects_ipv6_with_extension_header() {
-        // Next Header 0 = hop-by-hop options.
-        let pkt = ether(0x86DD, &ipv6(0, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), None);
-    }
-
-    #[test]
-    fn rejects_truncated_ipv6() {
-        let pkt = ether(0x86DD, &[0x60; 39]);
-        assert_eq!(strip_tzsp(&pkt), None);
-    }
-
-    #[test]
-    fn rejects_wrong_port() {
-        let pkt = ether(0x86DD, &ipv6(17, &udp(5000, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), None);
-    }
-
-    #[test]
-    fn rejects_ipv4_bad_ihl() {
-        let mut ip = ipv4(17, &udp(37008, &tzsp_payload(INNER)));
-        ip[0] = 0x44; // IHL 4 -> 16 bytes, below the 20-byte minimum
-        assert_eq!(strip_tzsp(&ether(0x0800, &ip)), None);
-    }
-
-    #[test]
-    fn rejects_other_ethertype() {
-        let pkt = ether(0x0806, &ipv4(17, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), None);
-    }
-
-    #[test]
-    fn filename_uses_plain_timestamp_when_free() {
-        assert_eq!(unique_filename("cap", 1700, |_| false), "cap_1700.pcap");
-    }
-
-    #[test]
-    fn filename_adds_suffix_on_collision() {
-        let taken = ["cap_1700.pcap", "cap_1700_1.pcap"];
-        let name = unique_filename("cap", 1700, |p| taken.contains(&p));
-        assert_eq!(name, "cap_1700_2.pcap");
-    }
-
-    #[test]
-    fn filename_keeps_directory_prefix() {
-        let name = unique_filename("/data/caps/site1", 1700, |p| p == "/data/caps/site1_1700.pcap");
-        assert_eq!(name, "/data/caps/site1_1700_1.pcap");
+    fn strips_after_tagged_field() {
+        // Tag 0x0A with a 3-byte value, then END.
+        let mut d = vec![0x01, 0x00, 0x00, 0x01, 0x0A, 0x03, 0xAA, 0xBB, 0xCC, 0x01];
+        d.extend_from_slice(INNER);
+        assert_eq!(strip_tzsp(&d), Some((TZSP_ENCAP_ETHERNET, INNER)));
     }
 
     #[test]
     fn returns_non_ethernet_encapsulation() {
-        // 18 = IEEE 802.11; returned as-is for the caller to reject.
-        let pkt = ether(0x0800, &ipv4(17, &udp(37008, &tzsp_payload_encap(18, INNER))));
-        assert_eq!(strip_tzsp(&pkt), Some((18, INNER)));
+        let d = tzsp_payload_encap(18, INNER);
+        assert_eq!(strip_tzsp(&d), Some((18, INNER)));
+    }
+
+    #[test]
+    fn rejects_malformed_or_empty() {
+        let no_frame = tzsp_payload_encap(TZSP_ENCAP_ETHERNET, b"");
+        for bad in [
+            &[][..],
+            &[0x01, 0x00, 0x00][..],                   // short fixed header
+            &[0x01, 0x00, 0x00, 0x01, 0x00, 0x00][..], // no END tag
+            &[0x01, 0x00, 0x00, 0x01, 0x0A, 0x09, 0xAA][..], // tag longer than data
+            &no_frame[..],                             // keepalive-style, no frame
+        ] {
+            assert_eq!(strip_tzsp(bad), None, "{:02x?} should be rejected", bad);
+        }
+    }
+
+    #[test]
+    fn candidate_filenames() {
+        assert_eq!(candidate_filename("cap", 1700, 0), "cap_1700.pcap");
+        assert_eq!(candidate_filename("cap", 1700, 2), "cap_1700_2.pcap");
+        assert_eq!(candidate_filename("/data/caps/site1", 1700, 1), "/data/caps/site1_1700_1.pcap");
+    }
+
+    #[test]
+    fn create_output_file_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("tzsp_ng_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("cap").to_string_lossy().into_owned();
+
+        std::fs::write(format!("{}_1700.pcap", prefix), b"keep me").unwrap();
+        let (first, _) = create_output_file(&prefix, 1700).unwrap();
+        let (second, _) = create_output_file(&prefix, 1700).unwrap();
+
+        assert_eq!(first, format!("{}_1700_1.pcap", prefix));
+        assert_eq!(second, format!("{}_1700_2.pcap", prefix));
+        assert_eq!(std::fs::read(format!("{}_1700.pcap", prefix)).unwrap(), b"keep me");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

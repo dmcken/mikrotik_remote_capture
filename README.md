@@ -32,7 +32,7 @@ This leaves the TZSP headers in place however, to use more advanced tools you wo
 ## Tools
 
 * clean/ contains both a python and rust tools to remove the TZSP headers from an existing capture.
-* tzsp_ng_capture/ is a rust program to capture directly off the wire and strip the header before writing to disk.
+* tzsp_ng_capture/ is a rust program that receives the stream on a UDP socket (no root or libpcap needed) and strips the header before writing to disk.
 
 ## Notes
 
