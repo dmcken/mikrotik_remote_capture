@@ -60,14 +60,24 @@ def main() -> None:
     with scapy.all.PcapNgReader(args.input) as cap_file, \
         scapy.all.PcapNgWriter(args.output) as output_file:
         count = 0
+        skipped = 0
         for curr_pkt in cap_file:
-            cleaned = curr_pkt[scapy.contrib.tzsp.TZSPTagEnd].payload
+            # curr_pkt[...] raises IndexError when the packet doesn't
+            # actually have a TZSPTagEnd layer (not TZSP, or scapy
+            # couldn't dissect it) -- on a long capture, one such
+            # packet used to crash the whole run and silently lose
+            # everything after it. Skip and count it instead.
+            try:
+                cleaned = curr_pkt[scapy.contrib.tzsp.TZSPTagEnd].payload
+            except IndexError:
+                skipped += 1
+                continue
             output_file.write(cleaned)
             count += 1
             if count % modulus == 0:
                 logger.info(f"{count:,}")
 
-    logger.info(f"Completed processing {count:,} packets")
+    logger.info(f"Completed processing {count:,} packets ({skipped:,} skipped, not TZSP/unparseable)")
 
 if __name__ == '__main__':
     main()
