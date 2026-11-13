@@ -1,62 +1,46 @@
 # Clean a capture file of TZSP
 
-A mikrotik capture has packets with TZSP encapsulation.
+A MikroTik sniffer stream captured as-is (e.g. with `tshark -f "udp port 37008"`)
+contains every sniffed frame wrapped in Ethernet + IP + UDP + TZSP headers:
 
+![Packet layout](Packet-layout.png)
 
-## Using scapy
+To analyse the original traffic, those outer headers need to be removed. This
+folder contains two tools that do that to an existing capture file, plus notes
+on a quick-and-dirty `editcap` alternative.
 
-Scapy is a python library for packet manipulation.
+To capture and strip in one step instead, see
+[`../tzsp_ng_capture`](../tzsp_ng_capture/README.md).
 
-```bash
-time python3 clean/clean_pcap.py
-Done
+## Tools
 
-real    12m51.613s
-user    12m40.736s
-sys     0m6.687s
-```
+| Tool | Input | Output | Notes |
+|------|-------|--------|-------|
+| [`tzsp_strip_rs`](tzsp_strip_rs/README.md) | pcap or pcapng | pcap | Fastest. Port fixed at 37008. |
+| [`tzsp_strip_py`](tzsp_strip_py/README.md) | pcapng | pcapng | Port configurable with `-p`. Reports skipped packets. |
 
-Pros:
-* Easily adapts to changes in packet format.
+Both tools parse each packet (Ethernet → IPv4 → UDP → TZSP, including TZSP
+tagged fields) and only write the inner frame. Packets that aren't valid
+TZSP, or don't parse cleanly, are skipped instead of being written still
+wrapped.
 
-Cons:
-* Slow (relatively speaking) - By having to parse and analyze each packet its a much slower process.
+### Shared limitations
 
-## Using editcap
-
-The Ethernet+IP+UDP+TZSP header *should* not change in size over the course of a capture.
-
-Header lengths:
-* IPv4 - 47
-* IPv6 - ???
-
-So an alternative method could be to blindly chop the header off of the begining of each packet.
-
-```bash
-editcap.exe -C 47 <input>.pcapng <output>.pcapng
-
-time editcap -C 47 <input file>.pcap <output file>.pcap
-
-real    0m2.855s
-user    0m0.607s
-sys     0m2.188s
-```
-
-Pros:
-* As shown above its extremely fast (since it ignores parsing the packet entirely).
-
-Cons:
-* If the length of the header changes length for any reason, editcap will continue to crop the packet blindly so data can get corrupted or misformatted.
+- **IPv4 only.** TZSP sent over IPv6 is skipped.
+- **Ethernet input only.** The input must use the Ethernet link type. A capture
+  taken with `tshark -i any` uses Linux cooked (SLL) framing, and every packet
+  will be skipped without a warning.
+- **No VLAN tags.** If the capture host saw the stream on a tagged trunk, the
+  packets are skipped.
+- **No IP reassembly.** If the router's TZSP datagrams were fragmented, the
+  first fragment is written truncated and the remaining fragments are skipped.
 
 ## Using rust
 
-Test using 1GB pcap file.
+Test using a 1GB pcap file:
 
 ```bash
-time cargo run --release -- input.pcap output.pcap
-   Compiling tzsp_strip_rs v0.1.0 (/home/dmcken/code/mikrotik_remote_capture/clean/tzsp_strip_rs)
-    Finished `release` profile [optimized] target(s) in 0.40s
-     Running `target/release/tzsp_strip_rs input.pcap output.pcap`
+time ./target/release/tzsp_strip_rs input.pcap output.pcap
 Done. Extracted packets are in output.pcap
 
 real    0m3.677s
@@ -65,9 +49,53 @@ sys     0m2.790s
 ```
 
 Pros:
-* Quite fast
-* Actually parses packets for sanity check
+* Quite fast.
+* Actually parses packets as a sanity check.
 
-# Alternative projects:
+## Using Python
 
-* [tzsp2pacp](https://github.com/thefloweringash/tzsp2pcap)
+The Python tool uses scapy only to read and write the capture file. It parses
+the headers directly from the raw bytes, using the same logic as the Rust tool.
+An earlier version built scapy's full layer objects for every packet and took
+about 13 minutes on the same 1GB file. The current version is roughly 50×
+faster.
+
+Pros:
+* Easy to modify.
+* Logs progress and how many packets were skipped.
+
+Cons:
+* Still slower than the Rust tool.
+* Currently only reads pcapng input (see its README).
+
+## Using editcap
+
+The Ethernet + IP + UDP + TZSP header *should* not change in size over the
+course of a capture. For a minimal TZSP header (4 fixed bytes + END tag) the
+header lengths are:
+
+* IPv4: 14 + 20 + 8 + 5 = **47** bytes
+* IPv6: 14 + 40 + 8 + 5 = **67** bytes
+
+So an alternative method is to blindly chop that many bytes off the beginning of
+each packet:
+
+```bash
+time editcap -C 47 <input file>.pcap <output file>.pcap
+
+real    0m2.855s
+user    0m0.607s
+sys     0m2.188s
+```
+
+Pros:
+* Extremely fast, since it doesn't parse the packets at all.
+
+Cons:
+* If the header length changes for any reason (IP options, extra TZSP tags,
+  non-TZSP packets in the capture), editcap keeps cropping blindly and the
+  output is corrupted.
+
+## Alternative projects
+
+* [tzsp2pcap](https://github.com/thefloweringash/tzsp2pcap)
