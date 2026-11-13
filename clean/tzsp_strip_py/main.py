@@ -150,14 +150,16 @@ def parse_argument() -> argparse.Namespace:
         argparse.Namespace: The parsed arguments.
     """
     parser = argparse.ArgumentParser(
-                    prog='ProgramName',
-                    description='What the program does',
-                    epilog='Text at the bottom of help')
+                    prog='tzsp_strip_py',
+                    description='Strip the Ethernet/IP/UDP/TZSP wrapper from a MikroTik '
+                                'sniffer capture, writing only the original frames.',
+                    epilog='Input may be pcap or pcapng; output is always pcapng.')
 
-    parser.add_argument('input')
-    parser.add_argument('output')
+    parser.add_argument('input', help='capture file to clean (pcap or pcapng)')
+    parser.add_argument('output', help='pcapng file to write (overwritten if it exists)')
 
-    parser.add_argument('-p','--port', default=37008, type=int)
+    parser.add_argument('-p', '--port', default=37008, type=int,
+                        help='UDP destination port the TZSP stream was sent to (default: %(default)s)')
 
     args = parser.parse_args()
 
