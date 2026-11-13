@@ -1,7 +1,22 @@
 // Rust TZSP stripper
 
-use std::env;
+use clap::Parser;
 use pcap::{Capture, Packet};
+
+/// Strip TZSP encapsulation from a MikroTik sniffer capture file.
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+struct Args {
+    /// Capture file to clean (pcap or pcapng)
+    input: String,
+
+    /// Output file to write (always classic pcap)
+    output: String,
+
+    /// UDP destination port the TZSP stream was sent to
+    #[arg(short, long, default_value_t = 37008)]
+    port: u16,
+}
 
 fn read_u16(buf: &[u8]) -> u16 {
     ((buf[0] as u16) << 8) | (buf[1] as u16)
@@ -53,19 +68,18 @@ fn parse_tzsp_header(buf: &[u8]) -> Option<usize> {
 ///
 /// Returns `None` (never the original, still-wrapped packet) whenever
 /// the frame isn't a recognisable Ethernet/IPv4-or-IPv6/UDP/TZSP
-/// packet on port 37008, or its TZSP header can't be walked cleanly --
+/// packet on `tzsp_port`, or its TZSP header can't be walked cleanly --
 /// callers drop these rather than writing them through to the
 /// "cleaned" capture, which would otherwise silently reintroduce the
 /// TZSP/IP/Ethernet wrapper for exactly the packets most likely to
 /// confuse downstream analysis.
-fn strip_tzsp(data: &[u8]) -> Option<&[u8]> {
+fn strip_tzsp(data: &[u8], tzsp_port: u16) -> Option<&[u8]> {
     const ETHER_LEN: usize = 14;
     const ETHERTYPE_IPV4: u16 = 0x0800;
     const ETHERTYPE_IPV6: u16 = 0x86DD;
     const IPV4_MIN_LEN: usize = 20;
     const IPV6_LEN: usize = 40;
     const IPPROTO_UDP: u8 = 17;
-    const UDP_PORT_TZSP: u16 = 37008;
 
     if data.len() < ETHER_LEN {
         return None;
@@ -113,7 +127,7 @@ fn strip_tzsp(data: &[u8]) -> Option<&[u8]> {
     }
 
     let dst_port = read_u16(&udp[2..4]);
-    if dst_port != UDP_PORT_TZSP {
+    if dst_port != tzsp_port {
         return None;
     }
 
@@ -132,26 +146,33 @@ fn strip_tzsp(data: &[u8]) -> Option<&[u8]> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
 
-    // CLI args
-    let args: Vec<String> = env::args().collect();
+    let mut cap = Capture::from_file(&args.input)
+        .map_err(|e| format!("Can't open input '{}': {}", args.input, e))?;
+    let mut output = cap
+        .savefile(&args.output)
+        .map_err(|e| format!("Can't create output '{}': {}", args.output, e))?;
 
-    if args.len() != 3 {
-        eprintln!("Usage: {} <input.pcap> <output.pcap>", args[0]);
-        std::process::exit(1);
-    }
+    let mut written: u64 = 0;
+    let mut skipped: u64 = 0;
 
-    let input_file = &args[1];
-    let output_file = &args[2];
+    // Loop until a clean end of file. Any other read error (e.g. a
+    // truncated or corrupt input) is reported and makes the tool exit
+    // non-zero, rather than being mistaken for the end of the file.
+    let read_error = loop {
+        let packet = match cap.next_packet() {
+            Ok(packet) => packet,
+            Err(pcap::Error::NoMorePackets) => break None,
+            Err(e) => break Some(e),
+        };
 
-
-    let mut cap = Capture::from_file(input_file)?;
-    let mut output = cap.savefile(output_file)?;
-
-    while let Ok(packet) = cap.next_packet() {
-        let inner = match strip_tzsp(packet.data) {
+        let inner = match strip_tzsp(packet.data, args.port) {
             Some(v) => v,
-            None => continue,
+            None => {
+                skipped += 1;
+                continue;
+            }
         };
 
         // ----------------------------
@@ -168,10 +189,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         output.write(&new_packet);
-    }
+        written += 1;
+    };
 
-    println!("Done. Extracted packets are in output.pcap");
-    Ok(())
+    output.flush()?;
+
+    let summary = format!(
+        "{} packets written to {}, {} skipped (not TZSP/unparseable)",
+        written, args.output, skipped,
+    );
+
+    match read_error {
+        None => {
+            println!("Done. {}", summary);
+            Ok(())
+        }
+        Some(e) => {
+            eprintln!("Error reading '{}' after {} packets: {}", args.input, written + skipped, e);
+            eprintln!("Partial output: {}", summary);
+            std::process::exit(1);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -225,44 +263,51 @@ mod tests {
     #[test]
     fn strips_ipv4() {
         let pkt = ether(0x0800, &ipv4(17, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), Some(INNER));
+        assert_eq!(strip_tzsp(&pkt, 37008), Some(INNER));
     }
 
     #[test]
     fn strips_ipv6() {
         let pkt = ether(0x86DD, &ipv6(17, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), Some(INNER));
+        assert_eq!(strip_tzsp(&pkt, 37008), Some(INNER));
     }
 
     #[test]
     fn rejects_ipv6_with_extension_header() {
         // Next Header 0 = hop-by-hop options.
         let pkt = ether(0x86DD, &ipv6(0, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), None);
+        assert_eq!(strip_tzsp(&pkt, 37008), None);
     }
 
     #[test]
     fn rejects_truncated_ipv6() {
         let pkt = ether(0x86DD, &[0x60; 39]);
-        assert_eq!(strip_tzsp(&pkt), None);
+        assert_eq!(strip_tzsp(&pkt, 37008), None);
     }
 
     #[test]
     fn rejects_wrong_port() {
         let pkt = ether(0x86DD, &ipv6(17, &udp(5000, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), None);
+        assert_eq!(strip_tzsp(&pkt, 37008), None);
     }
 
     #[test]
     fn rejects_ipv4_bad_ihl() {
         let mut ip = ipv4(17, &udp(37008, &tzsp_payload(INNER)));
         ip[0] = 0x44; // IHL 4 -> 16 bytes, below the 20-byte minimum
-        assert_eq!(strip_tzsp(&ether(0x0800, &ip)), None);
+        assert_eq!(strip_tzsp(&ether(0x0800, &ip), 37008), None);
     }
 
     #[test]
     fn rejects_other_ethertype() {
         let pkt = ether(0x0806, &ipv4(17, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), None);
+        assert_eq!(strip_tzsp(&pkt, 37008), None);
+    }
+
+    #[test]
+    fn honours_custom_port() {
+        let pkt = ether(0x86DD, &ipv6(17, &udp(5000, &tzsp_payload(INNER))));
+        assert_eq!(strip_tzsp(&pkt, 5000), Some(INNER));
+        assert_eq!(strip_tzsp(&pkt, 37008), None);
     }
 }

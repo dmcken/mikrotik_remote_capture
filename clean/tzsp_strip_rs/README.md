@@ -10,13 +10,14 @@ For each packet in the input file it:
 
 1. Checks for an Ethernet frame with ethertype IPv4 (`0x0800`) or IPv6
    (`0x86DD`).
-2. Checks that the IP protocol (IPv6: Next Header) is UDP and the destination port is `37008`.
+2. Checks that the IP protocol (IPv6: Next Header) is UDP and the destination
+   port matches `--port`.
 3. Walks the TZSP header's tag list, handling the zero-length PADDING and END
    tags.
 4. Writes everything after the TZSP header to the output, setting the packet
    length to the stripped size.
 
-Packets that fail any of these checks are skipped.
+Packets that fail any of these checks are skipped and counted.
 
 ## Installing
 
@@ -48,15 +49,26 @@ No special privileges are needed, since it only reads and writes files.
 ## Usage
 
 ```
-tzsp_strip_rs <input> <output>
+tzsp_strip_rs [-p PORT] <input> <output>
 ```
 
-| Argument | Description |
-|----------|-------------|
-| `<input>` | Capture to clean. Anything libpcap can read: pcap or pcapng. |
-| `<output>` | File to write. Always classic pcap, whatever extension you give it. Overwritten if it exists. |
+| Argument / flag | Default | Description |
+|-----------------|---------|-------------|
+| `<input>` | *(required)* | Capture to clean. Anything libpcap can read: pcap or pcapng. |
+| `<output>` | *(required)* | File to write. Always classic pcap, whatever extension you give it. Overwritten if it exists. |
+| `-p`, `--port PORT` | `37008` | UDP destination port the TZSP stream was sent to. |
+| `-h`, `--help` | | Show help. |
+| `-V`, `--version` | | Show version. |
 
-There are no flags. The TZSP port is fixed at `37008`, the MikroTik default.
+When it finishes it prints a summary:
+
+```
+Done. 245312 packets written to clean.pcap, 17 skipped (not TZSP/unparseable)
+```
+
+If the input can't be read to the end (for example a truncated or corrupt
+file), it prints the error and a summary of the partial output, then exits with
+status 1. Everything read before the error is still written to the output.
 
 ### Example
 
@@ -74,11 +86,6 @@ cargo run --release -- raw.pcapng clean.pcap
 
 ## Limitations
 
-- The final message always reads `Extracted packets are in output.pcap`, even
-  when you gave a different output name.
-- Skipped packets are not counted or reported.
-- A read error partway through the input (e.g. a truncated file) ends
-  processing silently, the same as reaching the end of the file.
 - No IPv6 extension headers, Ethernet input only, no VLAN tags, no IP
   reassembly. See the
   [parent README](../README.md#shared-limitations).

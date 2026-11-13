@@ -16,8 +16,8 @@ To capture and strip in one step instead, see
 
 | Tool | Input | Output | Notes |
 |------|-------|--------|-------|
-| [`tzsp_strip_rs`](tzsp_strip_rs/README.md) | pcap or pcapng | pcap | Fastest. Port fixed at 37008. |
-| [`tzsp_strip_py`](tzsp_strip_py/README.md) | pcap or pcapng | pcapng | Port configurable with `-p`. Reports skipped packets. |
+| [`tzsp_strip_rs`](tzsp_strip_rs/README.md) | pcap or pcapng | pcap | Fastest. |
+| [`tzsp_strip_py`](tzsp_strip_py/README.md) | pcap or pcapng | pcapng | Easiest to modify. |
 
 Both tools parse each packet (Ethernet → IPv4 or IPv6 → UDP → TZSP, including TZSP
 tagged fields) and only write the inner frame. Packets that aren't valid
@@ -63,7 +63,7 @@ faster.
 
 Pros:
 * Easy to modify.
-* Logs progress and how many packets were skipped.
+* Logs progress every 100,000 packets on large files.
 
 Cons:
 * Still slower than the Rust tool.
