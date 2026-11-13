@@ -21,6 +21,7 @@
 //! module. Both are checked against the shared cases in
 //! `testdata/tzsp_vectors.tsv`.
 
+mod ip;
 pub mod pcap;
 
 /// Standard UDP port for TZSP streams.
@@ -29,18 +30,9 @@ pub const DEFAULT_PORT: u16 = 37008;
 /// TZSP encapsulation value for Ethernet frames.
 pub const ENCAP_ETHERNET: u16 = 1;
 
-const ETHER_LEN: usize = 14;
-const ETHERTYPE_IPV4: u16 = 0x0800;
-const ETHERTYPE_IPV6: u16 = 0x86DD;
-/// Ethertypes (TPIDs) that introduce a VLAN tag: 802.1Q, 802.1ad (QinQ
-/// outer tag) and the pre-standard 0x9100 some switches use for QinQ.
-const VLAN_TPIDS: [u16; 3] = [0x8100, 0x88A8, 0x9100];
-const IPV4_MIN_LEN: usize = 20;
-const IPV6_LEN: usize = 40;
-const IPPROTO_UDP: u8 = 17;
 const UDP_LEN: usize = 8;
 
-fn read_u16(buf: &[u8]) -> u16 {
+pub(crate) fn read_u16(buf: &[u8]) -> u16 {
     ((buf[0] as u16) << 8) | (buf[1] as u16)
 }
 
@@ -122,52 +114,26 @@ pub fn strip(tzsp: &[u8]) -> Option<(u16, &[u8])> {
 /// Strip the Ethernet/IP/UDP/TZSP wrapper from a captured Ethernet frame.
 ///
 /// Accepts TZSP over IPv4 or IPv6 sent to UDP port `port`, optionally inside
-/// any number of VLAN tags (802.1Q, 802.1ad/QinQ). For IPv6, UDP must
-/// directly follow the IPv6 header; extension headers aren't walked. Returns
-/// the same as [`strip`], or `None` (never the still-wrapped frame) if any
-/// layer doesn't match. Callers should drop those rather than writing them
-/// through, which would put the wrapper back for exactly the packets most
-/// likely to confuse later analysis.
+/// any number of VLAN tags (802.1Q, 802.1ad/QinQ), and with IPv6 extension
+/// headers (Hop-by-Hop, Routing, Destination Options, AH) before the UDP
+/// header. Returns the same as [`strip`], or `None` (never the still-wrapped
+/// frame) if any layer doesn't match. Callers should drop those rather than
+/// writing them through, which would put the wrapper back for exactly the
+/// packets most likely to confuse later analysis.
+///
+/// IP fragments are rejected too, since they need reassembling first.
 pub fn strip_frame(data: &[u8], port: u16) -> Option<(u16, &[u8])> {
-    if data.len() < ETHER_LEN {
-        return None;
+    match ip::parse(data)? {
+        ip::Network::Udp(udp) => strip_udp(udp, port),
+        ip::Network::Fragment(_) => None,
     }
+}
 
-    // Skip any VLAN tags (4 bytes each: TPID, then TCI) to reach the real
-    // ethertype.
-    let mut ethertype_at = 12;
-    while VLAN_TPIDS.contains(&read_u16(&data[ethertype_at..ethertype_at + 2])) {
-        ethertype_at += 4;
-        if data.len() < ethertype_at + 2 {
-            return None;
-        }
-    }
-
-    let ip = &data[ethertype_at + 2..];
-    let udp = match read_u16(&data[ethertype_at..ethertype_at + 2]) {
-        ETHERTYPE_IPV4 => {
-            if ip.len() < IPV4_MIN_LEN {
-                return None;
-            }
-            let ihl = (ip[0] & 0x0F) as usize * 4;
-            if ihl < IPV4_MIN_LEN || ip.len() < ihl || ip[9] != IPPROTO_UDP {
-                return None;
-            }
-            &ip[ihl..]
-        }
-        ETHERTYPE_IPV6 => {
-            if ip.len() < IPV6_LEN || ip[6] != IPPROTO_UDP {
-                return None;
-            }
-            &ip[IPV6_LEN..]
-        }
-        _ => return None,
-    };
-
+/// Strip the UDP and TZSP headers from a UDP datagram sent to `port`.
+fn strip_udp(udp: &[u8], port: u16) -> Option<(u16, &[u8])> {
     if udp.len() < UDP_LEN || read_u16(&udp[2..4]) != port {
         return None;
     }
-
     strip(&udp[UDP_LEN..])
 }
 

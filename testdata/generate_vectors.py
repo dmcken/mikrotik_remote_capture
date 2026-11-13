@@ -28,10 +28,14 @@ def udp(payload: bytes, dport: int = PORT) -> bytes:
             + (8 + len(payload)).to_bytes(2, 'big') + b'\x00\x00' + payload)
 
 
-def ipv4(payload: bytes, proto: int = 17, ihl: int = 5) -> bytes:
+def ipv4(payload: bytes, proto: int = 17, ihl: int = 5, ident: int = 0,
+         frag_offset: int = 0, more: bool = False, total_len: int | None = None) -> bytes:
+    '''IPv4 header + payload. frag_offset is in bytes (a multiple of 8).'''
     hdr = bytearray(ihl * 4)
     hdr[0] = 0x40 | ihl
-    hdr[2:4] = (len(hdr) + len(payload)).to_bytes(2, 'big')
+    hdr[2:4] = (total_len if total_len is not None else len(hdr) + len(payload)).to_bytes(2, 'big')
+    hdr[4:6] = ident.to_bytes(2, 'big')
+    hdr[6:8] = ((0x2000 if more else 0) | (frag_offset // 8)).to_bytes(2, 'big')
     hdr[8] = 64
     hdr[9] = proto
     hdr[12:16] = bytes([192, 0, 2, 2])
@@ -39,15 +43,40 @@ def ipv4(payload: bytes, proto: int = 17, ihl: int = 5) -> bytes:
     return bytes(hdr) + payload
 
 
-def ipv6(payload: bytes, next_header: int = 17) -> bytes:
+def ipv6(payload: bytes, next_header: int = 17, src: str = '20010db8000000000000000000000002') -> bytes:
+    '''IPv6 header + payload (which includes any extension headers).'''
     hdr = bytearray(40)
     hdr[0] = 0x60
     hdr[4:6] = len(payload).to_bytes(2, 'big')
     hdr[6] = next_header
     hdr[7] = 64
-    hdr[8:24] = bytes.fromhex('20010db8000000000000000000000002')
+    hdr[8:24] = bytes.fromhex(src)
     hdr[24:40] = bytes.fromhex('20010db8000000000000000000000001')
     return bytes(hdr) + payload
+
+
+# IPv6 extension headers. Each takes the Next Header that follows it.
+HOP_BY_HOP, ROUTING, FRAGMENT, ESP, AH, DEST_OPTS = 0, 43, 44, 50, 51, 60
+
+
+def ext_options(next_header: int) -> bytes:
+    '''Hop-by-Hop or Destination Options: 8 bytes, PadN filling.'''
+    return bytes([next_header, 0, 1, 4, 0, 0, 0, 0])
+
+
+def ext_routing(next_header: int) -> bytes:
+    '''Segment Routing Header (type 4) with one segment: 24 bytes.'''
+    return bytes([next_header, 2, 4, 0, 0, 0, 0, 0]) + bytes.fromhex('20010db8000000000000000000000001')
+
+
+def ext_ah(next_header: int) -> bytes:
+    '''AH with a 96-bit ICV: 24 bytes, length field 24/4 - 2 = 4.'''
+    return bytes([next_header, 4, 0, 0]) + (0x1000).to_bytes(4, 'big') + (1).to_bytes(4, 'big') + bytes(12)
+
+
+def ext_fragment(next_header: int, offset: int = 0, more: bool = False, ident: int = 0x01020304) -> bytes:
+    '''Fragment header. offset is in bytes (a multiple of 8).'''
+    return bytes([next_header, 0]) + (offset | (1 if more else 0)).to_bytes(2, 'big') + ident.to_bytes(4, 'big')
 
 
 def ether(payload: bytes, ethertype: int) -> bytes:
@@ -92,7 +121,46 @@ CASES = [
     ('ipv4_not_udp', 'strip_frame', PORT, ether(ipv4(udp(tzsp()), proto=6), 0x0800), REJECT),
     ('ipv4_ihl_below_minimum', 'strip_frame', PORT,
      ether(b'\x44' + ipv4(udp(tzsp()))[1:], 0x0800), REJECT),
-    ('ipv6_extension_header', 'strip_frame', PORT, ether(ipv6(udp(tzsp()), next_header=0), 0x86DD), REJECT),
+    ('ipv4_total_length_below_header', 'strip_frame', PORT,
+     ether(ipv4(udp(tzsp()), total_len=19), 0x0800), REJECT),
+    # Ethernet padding/trailers (e.g. an FCS) after the IP packet are dropped
+    # using the IP length fields.
+    ('ipv4_ethernet_trailer_dropped', 'strip_frame', PORT,
+     ether(ipv4(udp(tzsp())), 0x0800) + b'\xde\xad\xbe\xef', ok()),
+    ('ipv6_ethernet_trailer_dropped', 'strip_frame', PORT,
+     ether(ipv6(udp(tzsp())), 0x86DD) + b'\xde\xad\xbe\xef', ok()),
+    # Cut short by the capture's snap length: written as far as it goes.
+    ('ipv4_truncated_by_snaplen', 'strip_frame', PORT,
+     ether(ipv4(udp(tzsp())), 0x0800)[:-5], ok(INNER[:-5])),
+    # IPv6 extension headers before UDP.
+    ('ipv6_hop_by_hop', 'strip_frame', PORT,
+     ether(ipv6(ext_options(17) + udp(tzsp()), HOP_BY_HOP), 0x86DD), ok()),
+    ('ipv6_destination_options', 'strip_frame', PORT,
+     ether(ipv6(ext_options(17) + udp(tzsp()), DEST_OPTS), 0x86DD), ok()),
+    ('ipv6_routing_srh', 'strip_frame', PORT,
+     ether(ipv6(ext_routing(17) + udp(tzsp()), ROUTING), 0x86DD), ok()),
+    ('ipv6_ah', 'strip_frame', PORT,
+     ether(ipv6(ext_ah(17) + udp(tzsp()), AH), 0x86DD), ok()),
+    ('ipv6_header_chain', 'strip_frame', PORT,
+     ether(ipv6(ext_options(ROUTING) + ext_routing(AH) + ext_ah(DEST_OPTS) + ext_options(17) + udp(tzsp()),
+                HOP_BY_HOP), 0x86DD), ok()),
+    ('ipv6_atomic_fragment', 'strip_frame', PORT,
+     ether(ipv6(ext_fragment(17) + udp(tzsp()), FRAGMENT), 0x86DD), ok()),
+    ('ipv6_esp', 'strip_frame', PORT,
+     ether(ipv6(bytes(8) + udp(tzsp()), ESP), 0x86DD), REJECT),
+    ('ipv6_not_udp', 'strip_frame', PORT, ether(ipv6(udp(tzsp()), 6), 0x86DD), REJECT),
+    ('ipv6_extension_header_truncated', 'strip_frame', PORT,
+     ether(ipv6(ext_routing(17)[:20], ROUTING), 0x86DD), REJECT),
+    ('ipv6_extension_header_length_missing', 'strip_frame', PORT,
+     ether(ipv6(b'\x11', HOP_BY_HOP), 0x86DD), REJECT),
+    # Fragments need reassembling first, so strip_frame() rejects them rather
+    # than writing a truncated frame.
+    ('ipv4_first_fragment', 'strip_frame', PORT,
+     ether(ipv4(udp(tzsp())[:32], ident=7, more=True), 0x0800), REJECT),
+    ('ipv4_last_fragment', 'strip_frame', PORT,
+     ether(ipv4(udp(tzsp())[32:], ident=7, frag_offset=32), 0x0800), REJECT),
+    ('ipv6_first_fragment', 'strip_frame', PORT,
+     ether(ipv6(ext_fragment(17, more=True) + udp(tzsp())[:32], FRAGMENT), 0x86DD), REJECT),
     ('ipv6_truncated', 'strip_frame', PORT, ether(b'\x60' * 39, 0x86DD), REJECT),
     ('ethernet_truncated', 'strip_frame', PORT, bytes(13), REJECT),
     ('arp_ethertype', 'strip_frame', PORT, ether(bytes(28), 0x0806), REJECT),

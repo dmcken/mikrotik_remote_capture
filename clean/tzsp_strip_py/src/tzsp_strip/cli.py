@@ -11,17 +11,12 @@ import sys
 # Scapy imports
 import scapy.utils
 
+from tzsp_strip import ip
+from tzsp_strip.ip import read_u16 as _read_u16
+
 logger = logging.getLogger(__name__)
 
-ETHER_LEN = 14
-ETHERTYPE_IPV4 = 0x0800
-ETHERTYPE_IPV6 = 0x86DD
-# Ethertypes (TPIDs) that introduce a VLAN tag: 802.1Q, 802.1ad (QinQ outer
-# tag) and the pre-standard 0x9100 some switches use for QinQ.
-VLAN_TPIDS = (0x8100, 0x88A8, 0x9100)
-IPV4_MIN_LEN = 20
-IPV6_LEN = 40
-IPPROTO_UDP = 17
+UDP_LEN = 8
 LINKTYPE_ETHERNET = 1
 LINKTYPES_LINUX_SLL = (113, 276)  # what captures on Linux "any" use
 
@@ -34,10 +29,6 @@ TZSP_ENCAP_NAMES = {
     119: 'Prism header',
     127: '802.11 AVS',
 }
-
-
-def _read_u16(buf: bytes, offset: int) -> int:
-    return (buf[offset] << 8) | buf[offset + 1]
 
 
 def parse_tzsp_header(buf: bytes) -> int | None:
@@ -102,66 +93,28 @@ def strip_tzsp(data: bytes, tzsp_port: int) -> tuple[int, bytes] | None:
 
     Python port of strip_frame() in the Rust tzsp crate. Handles TZSP
     carried over either IPv4 or IPv6, optionally inside any number of
-    VLAN tags (802.1Q, 802.1ad/QinQ). On success returns
-    (encapsulation, inner_frame), where encapsulation is the TZSP
-    encapsulation type (1 = Ethernet, 18 = 802.11, ...) that callers
-    must check before writing the frame. Returns None
-    whenever the frame isn't a recognisable Ethernet/IPv4-or-IPv6/UDP/
-    TZSP packet on tzsp_port, or its TZSP header can't be walked
-    cleanly -- callers should skip these rather than writing them
-    through unstripped.
+    VLAN tags (802.1Q, 802.1ad/QinQ) and with IPv6 extension headers
+    (Hop-by-Hop, Routing, Destination Options, AH) before the UDP header.
+    On success returns (encapsulation, inner_frame), where encapsulation
+    is the TZSP encapsulation type (1 = Ethernet, 18 = 802.11, ...) that
+    callers must check before writing the frame. Returns None whenever
+    the frame isn't a recognisable TZSP packet on tzsp_port, or its TZSP
+    header can't be walked cleanly -- callers should skip these rather
+    than writing them through unstripped.
+
+    IP fragments are rejected too, since they need reassembling first.
     '''
-    if len(data) < ETHER_LEN:
+    udp = ip.parse(data)
+    if not isinstance(udp, bytes):
         return None
+    return strip_udp(udp, tzsp_port)
 
-    # ----------------------------
-    # Ethernet + IP
-    # ----------------------------
-    # Skip any VLAN tags (4 bytes each: TPID, then TCI) to reach the
-    # real ethertype.
-    ether_type_at = 12
-    while _read_u16(data, ether_type_at) in VLAN_TPIDS:
-        ether_type_at += 4
-        if len(data) < ether_type_at + 2:
-            return None
-    ether_type = _read_u16(data, ether_type_at)
-    ip = data[ether_type_at + 2:]
 
-    if ether_type == ETHERTYPE_IPV4:
-        if len(ip) < IPV4_MIN_LEN:
-            return None
-        ihl = (ip[0] & 0x0F) * 4
-        if ihl < IPV4_MIN_LEN or len(ip) < ihl:
-            return None
-        if ip[9] != IPPROTO_UDP:
-            return None
-        udp = ip[ihl:]
-    elif ether_type == ETHERTYPE_IPV6:
-        if len(ip) < IPV6_LEN:
-            return None
-        # Next Header must be UDP directly. Extension headers
-        # (hop-by-hop, routing, fragment, ...) aren't walked; a TZSP
-        # stream shouldn't normally carry any.
-        if ip[6] != IPPROTO_UDP:
-            return None
-        udp = ip[IPV6_LEN:]
-    else:
+def strip_udp(udp: bytes, tzsp_port: int) -> tuple[int, bytes] | None:
+    '''Strip the UDP and TZSP headers from a UDP datagram sent to tzsp_port.'''
+    if len(udp) < UDP_LEN or _read_u16(udp, 2) != tzsp_port:
         return None
-
-    # ----------------------------
-    # UDP
-    # ----------------------------
-    if len(udp) < 8:
-        return None
-
-    dst_port = _read_u16(udp, 2)
-    if dst_port != tzsp_port:
-        return None
-
-    # ----------------------------
-    # TZSP
-    # ----------------------------
-    return strip_tzsp_payload(udp[8:])
+    return strip_tzsp_payload(udp[UDP_LEN:])
 
 
 def parse_argument() -> argparse.Namespace:

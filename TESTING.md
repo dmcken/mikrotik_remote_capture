@@ -30,8 +30,8 @@ full-size frames (1514 bytes) produce TZSP datagrams over a 1500-byte MTU.
 - [ ] **Same, IPv6 stream.** As above, over an IPv6 `streaming-server`.
 - [ ] **Same traffic captured with tshark, then run through both
       strippers.** Expect the limitation documented in
-      [clean/README.md](clean/README.md#shared-limitations): over IPv4,
-      truncated 1467-byte frames; over IPv6, frames skipped. Confirms how
+      [clean/README.md](clean/README.md#shared-limitations): large frames
+      skipped. Confirms how
       RouterOS fragments (or whether it sets DF and drops instead, which
       would show as missing large frames in `tzsp_ng_capture` too).
 - [ ] **Path MTU raised to 1600+ between router and capture host.** Expect
@@ -41,9 +41,10 @@ full-size frames (1514 bytes) produce TZSP datagrams over a 1500-byte MTU.
 
 - [ ] **IPv6 stream captured with tshark.** Run the check in
       [clean/README.md](clean/README.md#shared-limitations) for extension
-      headers. Fragment headers (44) are expected with full-size traffic;
-      anything else means something on the path adds headers the strippers
-      don't handle yet.
+      headers. Fragment headers (44) are expected with full-size traffic.
+      Others (0, 43, 51, 60) mean something on the path adds them; the
+      strippers handle those, but it's worth confirming on real traffic.
+      ESP (50) can't be stripped.
 
 ### Load and drops (`tzsp_ng_capture`)
 
