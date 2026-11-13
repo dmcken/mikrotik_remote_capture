@@ -5,7 +5,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // External
 use clap::Parser;
@@ -183,13 +185,27 @@ fn parse_size(input: &str) -> Result<u64, String> {
     Ok(value * multiplier)
 }
 
-/// Generate a timestamped file name for rotation
-fn generate_filename(prefix: &String) -> String {
+/// Pick a `<prefix>_<secs>.pcap` name that `exists` says is free,
+/// falling back to `<prefix>_<secs>_1.pcap`, `_2`, ... -- so two
+/// rotations within the same second (or a file left over from an
+/// earlier run) never get silently overwritten.
+fn unique_filename(prefix: &str, secs: u64, exists: impl Fn(&str) -> bool) -> String {
+    let mut candidate = format!("{}_{}.pcap", prefix, secs);
+    let mut n: u64 = 1;
+    while exists(&candidate) {
+        candidate = format!("{}_{}_{}.pcap", prefix, secs, n);
+        n += 1;
+    }
+    candidate
+}
+
+/// Generate a timestamped, not-yet-existing file name for rotation
+fn generate_filename(prefix: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    format!("{}_{}.pcap", prefix, now)
+    unique_filename(prefix, now, |p| Path::new(p).exists())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -257,6 +273,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut current_file_size: u64 = 0;
     let mut unstrippable_count: u64 = 0;
 
+    // Persistent capture errors (interface gone down/removed, etc.)
+    // would otherwise make next_packet() fail instantly in a tight
+    // loop, pinning a core and flooding stderr. Back off between
+    // retries, and give up once errors have persisted for a while.
+    const ERROR_RETRY_DELAY: Duration = Duration::from_secs(1);
+    const MAX_CONSECUTIVE_ERRORS: u32 = 30;
+    let mut consecutive_errors: u32 = 0;
+    let mut fatal_error: Option<pcap::Error> = None;
+
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
@@ -264,6 +289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match cap.next_packet() {
             Ok(packet) => {
+                consecutive_errors = 0;
                 match strip_tzsp(packet.data) {
                     Some(stripped) => {
                         // Calculate new packet header and write
@@ -311,10 +337,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(pcap::Error::TimeoutExpired) => {
                 // Just a periodic wakeup to re-check `running` --
                 // expected regularly while idle, not an error.
+                consecutive_errors = 0;
                 continue;
             }
             Err(e) => {
-                eprintln!("Capture error: {}", e);
+                consecutive_errors += 1;
+                eprintln!(
+                    "Capture error ({}/{}): {}",
+                    consecutive_errors, MAX_CONSECUTIVE_ERRORS, e,
+                );
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    fatal_error = Some(e);
+                    break;
+                }
+                thread::sleep(ERROR_RETRY_DELAY);
             }
         }
     }
@@ -326,6 +362,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             stats.received, stats.dropped, stats.if_dropped, unstrippable_count,
         );
     }
+
+    if let Some(e) = fatal_error {
+        eprintln!(
+            "Giving up after {} consecutive capture errors (last: {}). Output so far is in {}",
+            MAX_CONSECUTIVE_ERRORS, e, current_filename,
+        );
+        std::process::exit(1);
+    }
+
     println!("Exiting cleanly...");
     Ok(())
 }
@@ -420,5 +465,23 @@ mod tests {
     fn rejects_other_ethertype() {
         let pkt = ether(0x0806, &ipv4(17, &udp(37008, &tzsp_payload(INNER))));
         assert_eq!(strip_tzsp(&pkt), None);
+    }
+
+    #[test]
+    fn filename_uses_plain_timestamp_when_free() {
+        assert_eq!(unique_filename("cap", 1700, |_| false), "cap_1700.pcap");
+    }
+
+    #[test]
+    fn filename_adds_suffix_on_collision() {
+        let taken = ["cap_1700.pcap", "cap_1700_1.pcap"];
+        let name = unique_filename("cap", 1700, |p| taken.contains(&p));
+        assert_eq!(name, "cap_1700_2.pcap");
+    }
+
+    #[test]
+    fn filename_keeps_directory_prefix() {
+        let name = unique_filename("/data/caps/site1", 1700, |p| p == "/data/caps/site1_1700.pcap");
+        assert_eq!(name, "/data/caps/site1_1700_1.pcap");
     }
 }

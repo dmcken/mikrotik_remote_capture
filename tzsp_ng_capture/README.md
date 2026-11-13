@@ -21,6 +21,11 @@ from an existing capture after the fact).
    and starts a new one.
 5. On Ctrl-C it flushes the current file and prints the final libpcap stats.
 
+If capturing keeps failing (for example the interface goes down or is
+removed), it retries once a second. After 30 errors in a row it flushes the
+current file, prints the stats and exits with status 1. Any successful read
+resets the count, so brief problems don't stop the capture.
+
 Packets that can't be parsed as Ethernet/IP/UDP/TZSP (other ethertypes,
 truncated, malformed TZSP header) are **dropped**, not written through still wrapped. They
 are counted and reported as `unstrippable` in the stats output.
@@ -69,7 +74,7 @@ tzsp_ng_rotator --interface <INTERFACE> [--max-size <SIZE>] [--output-prefix <PR
 |------|-------|---------|-------------|
 | `--interface <INTERFACE>` | `-i` | *(required)* | Network interface to capture on, i.e. the interface that receives the stream from the router (e.g. `eth0`). |
 | `--max-size <SIZE>` | `-m` | `1GB` | Size at which the output file is rotated. A whole number with an optional unit: `B`, `KB`/`KiB`, `MB`/`MiB`, `GB`/`GiB`, `TB`/`TiB` (case-insensitive). All units are binary (1 KB = 1024 bytes). Decimals like `1.5GB` are not accepted. |
-| `--output-prefix <PREFIX>` | `-o` | `capture` | Prefix for output files. Files are named `<PREFIX>_<unix-timestamp>.pcap` in the current directory; the prefix may include a path, e.g. `/data/caps/site1`. |
+| `--output-prefix <PREFIX>` | `-o` | `capture` | Prefix for output files. Files are named `<PREFIX>_<unix-timestamp>.pcap` in the current directory; the prefix may include a path, e.g. `/data/caps/site1`. Existing files are never overwritten: if the name is taken (two rotations in the same second, or a file from an earlier run), `_1`, `_2`, … is added, e.g. `capture_1763025120_1.pcap`. |
 | `--help` | `-h` | | Show help. |
 | `--version` | `-V` | | Show version. |
 
@@ -127,7 +132,4 @@ version accepts IPv6 for `streaming-server`.
   untagged.
 - The rotation size counts only the stripped packet bytes, not pcap
   per-packet headers, so files end up slightly larger than `--max-size`.
-- File names have one-second resolution. With a very small `--max-size` and
-  high traffic, two rotations in the same second would reuse the same name and
-  overwrite the earlier file.
 - Output is classic pcap (`.pcap`), not pcapng.
