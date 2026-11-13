@@ -24,8 +24,17 @@ fn parse_tzsp_header(buf: &[u8]) -> Option<usize> {
         offset += 1;
 
         if tag == 1 {
-            // END tag
+            // END tag -- zero-length, no value byte follows.
             return Some(offset);
+        }
+
+        if tag == 0 {
+            // PADDING tag -- also zero-length (no length byte of its
+            // own), unlike every other tag. Treating it like a normal
+            // tagged field (as before) reads the next tag's type byte
+            // as a bogus length and desyncs the rest of the walk --
+            // RouterOS's sniffer does emit this tag for alignment.
+            continue;
         }
 
         if offset >= buf.len() {
