@@ -37,6 +37,14 @@ full-size frames (1514 bytes) produce TZSP datagrams over a 1500-byte MTU.
 - [ ] **Path MTU raised to 1600+ between router and capture host.** Expect
       no fragmentation and full frames from the strippers too.
 
+### IPv6 extension headers
+
+- [ ] **IPv6 stream captured with tshark.** Run the check in
+      [clean/README.md](clean/README.md#shared-limitations) for extension
+      headers. Fragment headers (44) are expected with full-size traffic;
+      anything else means something on the path adds headers the strippers
+      don't handle yet.
+
 ### Load and drops (`tzsp_ng_capture`)
 
 - [ ] **Sustained high packet rate.** Watch `kernel_dropped` in the stats

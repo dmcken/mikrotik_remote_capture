@@ -42,8 +42,27 @@ being written still wrapped.
   at least 1,600 so nothing is fragmented. The `skipped` count rises when it
   happens.
 - **No IPv6 extension headers.** For IPv6 transport, UDP must directly follow
-  the IPv6 header. RouterOS doesn't add extension headers to the stream, so in
-  practice the only one seen is the Fragment header above.
+  the IPv6 header. RouterOS doesn't add extension headers to the stream
+  itself, so today the only one expected is the Fragment header above. Others
+  could appear if something between the router and the capture host adds
+  them, for example:
+  - IPsec AH in transport mode between the router and the capture host (with
+    ESP the stream is encrypted, so no tool could strip it from a capture),
+  - SRv6 in insert mode, which leaves a Segment Routing Header on the packet,
+  - Hop-by-Hop or Destination Options headers added by other equipment.
+
+  Those packets are skipped and show up in the `skipped` count. To check a
+  capture for them (tshark walks extension headers, so it still finds the UDP
+  port):
+
+  ```bash
+  tshark -r raw.pcapng -Y 'ipv6 && udp.dstport == 37008 && ipv6.nxt != 17' -T fields -e ipv6.nxt | sort | uniq -c
+  ```
+
+  It counts the affected datagrams by their first extension header: 0
+  Hop-by-Hop, 43 Routing, 44 Fragment, 51 AH, 60 Destination Options.
+  `tzsp_ng_capture` isn't affected, since the kernel processes extension
+  headers before the tool receives the datagram.
 - **Ethernet only.** The input must use the Ethernet link type. Anything else,
   such as a capture taken with `tshark -i any` (Linux cooked/SLL framing), is
   rejected at startup with an error, not silently skipped.
