@@ -15,6 +15,9 @@
 //! Both return the TZSP encapsulation type along with the inner frame;
 //! callers decide what to do with non-Ethernet encapsulations.
 //!
+//! [`reassembly::Reassembler`] wraps [`strip_frame`] for capture files,
+//! reassembling TZSP datagrams that were IP-fragmented on the way.
+//!
 //! [`pcap::PcapWriter`] writes the tools' output files.
 //!
 //! `clean/tzsp_strip_py/src/tzsp_strip/cli.py` is a Python port of this
@@ -23,6 +26,7 @@
 
 mod ip;
 pub mod pcap;
+pub mod reassembly;
 
 /// Standard UDP port for TZSP streams.
 pub const DEFAULT_PORT: u16 = 37008;
@@ -121,7 +125,8 @@ pub fn strip(tzsp: &[u8]) -> Option<(u16, &[u8])> {
 /// writing them through, which would put the wrapper back for exactly the
 /// packets most likely to confuse later analysis.
 ///
-/// IP fragments are rejected too, since they need reassembling first.
+/// IP fragments are rejected too: they need reassembling first, which
+/// [`reassembly::Reassembler`] does. Use that to process a capture file.
 pub fn strip_frame(data: &[u8], port: u16) -> Option<(u16, &[u8])> {
     match ip::parse(data)? {
         ip::Network::Udp(udp) => strip_udp(udp, port),
@@ -130,7 +135,7 @@ pub fn strip_frame(data: &[u8], port: u16) -> Option<(u16, &[u8])> {
 }
 
 /// Strip the UDP and TZSP headers from a UDP datagram sent to `port`.
-fn strip_udp(udp: &[u8], port: u16) -> Option<(u16, &[u8])> {
+pub(crate) fn strip_udp(udp: &[u8], port: u16) -> Option<(u16, &[u8])> {
     if udp.len() < UDP_LEN || read_u16(&udp[2..4]) != port {
         return None;
     }

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-'''Generate tzsp_vectors.tsv: shared test cases for the TZSP parsers.
+'''Generate the shared test cases for the TZSP parsers.
+
+- tzsp_vectors.tsv: single packets through strip() / strip_frame().
+- reassembly_vectors.tsv: packet sequences through the fragment Reassembler.
 
 The Rust `tzsp` crate and the Python stripper (clean/tzsp_strip_py) both run
-every case in the generated file, so a parser change made in one language and
+every case in the generated files, so a parser change made in one language and
 not the other fails the tests.
 
 Edit the cases below, then re-run from anywhere (standard library only):
@@ -13,6 +16,7 @@ Edit the cases below, then re-run from anywhere (standard library only):
 from pathlib import Path
 
 OUT = Path(__file__).with_name('tzsp_vectors.tsv')
+REASSEMBLY_OUT = Path(__file__).with_name('reassembly_vectors.tsv')
 
 PORT = 37008
 INNER = bytes.fromhex('ffffffffffff020000000001') + b'\x08\x00' + b'inner ethernet frame'
@@ -194,6 +198,164 @@ HEADER = '''\
 '''
 
 
+# --- Reassembly cases ---------------------------------------------------
+
+# A TZSP datagram big enough to split: UDP header (8) + TZSP (5) + 200-byte
+# inner frame = 213 bytes, fragmented at multiples of 8.
+BIG_A = bytes.fromhex('ffffffffffff020000000001') + b'\x08\x00' + bytes(range(186))
+BIG_B = bytes.fromhex('ffffffffffff020000000001') + b'\x08\x00' + bytes(range(186))[::-1]
+assert len(BIG_A) == 200
+
+
+def udp_a(dport: int = PORT, encap: int = 1, inner: bytes = BIG_A) -> bytes:
+    return udp(tzsp(encap=encap, inner=inner), dport=dport)
+
+
+def chunks(data: bytes, cuts: list[int]) -> list[tuple[int, bytes, bool]]:
+    '''Split data at the given offsets: [(offset, chunk, more), ...].'''
+    bounds = [0] + cuts + [len(data)]
+    return [(bounds[i], data[bounds[i]:bounds[i + 1]], i + 2 < len(bounds)) for i in range(len(bounds) - 1)]
+
+
+def frag4(data: bytes, cuts: list[int], ident: int = 0x1234, proto: int = 17) -> list[bytes]:
+    return [ether(ipv4(c, proto=proto, ident=ident, frag_offset=o, more=m), 0x0800) for o, c, m in chunks(data, cuts)]
+
+
+def frag6(data: bytes, cuts: list[int], ident: int = 0x01020304, next_header: int = 17,
+          before: bytes = b'', first: int = FRAGMENT) -> list[bytes]:
+    '''IPv6 fragments; `before` = unfragmentable extension headers ahead of
+    the Fragment header (starting with protocol `first`).'''
+    return [ether(ipv6(before + ext_fragment(next_header, o, m, ident) + c, first), 0x86DD)
+            for o, c, m in chunks(data, cuts)]
+
+
+def with_src4(frame: bytes, last_octet: int) -> bytes:
+    '''Change an IPv4 frame's source address (no checksums are checked).'''
+    return frame[:14 + 15] + bytes([last_octet]) + frame[14 + 16:]
+
+
+def frame(inner: bytes = BIG_A, encap: int = 1) -> str:
+    return f'frame:{encap}:{inner.hex()}'
+
+
+FRAG = 'fragment'
+
+A4 = frag4(udp_a(), [64, 128])            # 3 fragments: 0-64, 64-128, 128-213
+B4 = frag4(udp_a(inner=BIG_B), [128], ident=0x9999)
+A6 = frag6(udp_a(), [64, 128])
+
+# (name, port, max_buffered or None, [(ms, frame, expected)], (reassembled, incomplete))
+REASSEMBLY_CASES = [
+    ('v4_in_order', PORT, None,
+     [(0, A4[0], FRAG), (1, A4[1], FRAG), (2, A4[2], frame())], (1, 0)),
+    ('v4_reverse_order', PORT, None,
+     [(0, A4[2], FRAG), (1, A4[1], FRAG), (2, A4[0], frame())], (1, 0)),
+    ('v4_unfragmented_passes_through', PORT, None,
+     [(0, ether(ipv4(udp_a()), 0x0800), frame())], (0, 0)),
+    ('v4_interleaved_datagrams', PORT, None,
+     [(0, A4[0], FRAG), (1, B4[0], FRAG), (2, A4[1], FRAG), (3, B4[1], frame(BIG_B)),
+      (4, A4[2], frame())], (2, 0)),
+    ('v4_same_id_different_source', PORT, None,
+     [(0, A4[0], FRAG), (1, with_src4(frag4(udp_a(inner=BIG_B), [64, 128])[0], 9), FRAG),
+      (2, A4[1], FRAG), (3, A4[2], frame()),
+      (4, with_src4(frag4(udp_a(inner=BIG_B), [64, 128])[1], 9), FRAG),
+      (5, with_src4(frag4(udp_a(inner=BIG_B), [64, 128])[2], 9), frame(BIG_B))], (2, 0)),
+    ('v4_duplicate_fragment_ignored', PORT, None,
+     [(0, A4[0], FRAG), (1, A4[0], FRAG), (2, A4[1], FRAG), (3, A4[2], frame())], (1, 0)),
+    ('v4_overlap_discards_datagram', PORT, None,
+     [(0, A4[0], FRAG), (1, frag4(udp_a(inner=BIG_B), [32, 96])[1], 'reject'),
+      (2, A4[1], 'reject'), (3, A4[2], 'reject')], (0, 1)),
+    ('v4_missing_fragment', PORT, None,
+     [(0, A4[0], FRAG), (1, A4[2], FRAG)], (0, 1)),
+    ('v4_completes_within_timeout', PORT, None,
+     [(0, A4[0], FRAG), (1, A4[1], FRAG), (29_000, A4[2], frame())], (1, 0)),
+    ('v4_timeout_drops_datagram', PORT, None,
+     [(0, A4[0], FRAG), (1, A4[1], FRAG), (31_000, A4[2], FRAG)], (0, 2)),
+    # The periodic sweep last ran at 29.5 s, so it's this datagram's own age
+    # check that drops it at 30.2 s.
+    ('v4_timeout_checked_between_sweeps', PORT, None,
+     [(0, frag4(udp_a(), [128])[0], FRAG), (29_500, B4[0], FRAG), (30_200, frag4(udp_a(), [128])[1], FRAG)],
+     (0, 3)),
+    ('v4_sweep_drops_stale_datagram', PORT, None,
+     [(0, A4[0], FRAG), (40_000, B4[0], FRAG), (40_001, B4[1], frame(BIG_B))], (1, 1)),
+    ('v4_reassembled_wrong_port', PORT, None,
+     [(0, frag4(udp_a(dport=5000), [128])[0], FRAG), (1, frag4(udp_a(dport=5000), [128])[1], 'reject')], (1, 0)),
+    ('v4_reassembled_custom_port', 5000, None,
+     [(0, frag4(udp_a(dport=5000), [128])[0], FRAG), (1, frag4(udp_a(dport=5000), [128])[1], frame())], (1, 0)),
+    ('v4_reassembled_80211', PORT, None,
+     [(0, frag4(udp_a(encap=18), [128])[0], FRAG), (1, frag4(udp_a(encap=18), [128])[1], frame(encap=18))],
+     (1, 0)),
+    # TZSP header of nothing but PADDING tags: no END tag.
+    ('v4_reassembled_not_tzsp', PORT, None,
+     [(0, frag4(udp(b'\x01\x00\x00\x01' + bytes(196)), [128])[0], FRAG),
+      (1, frag4(udp(b'\x01\x00\x00\x01' + bytes(196)), [128])[1], 'reject')], (1, 0)),
+    ('v4_non_udp_fragment_rejected', PORT, None,
+     [(0, frag4(udp_a(), [128], proto=6)[0], 'reject')], (0, 0)),
+    ('v4_padded_last_fragment', PORT, None,
+     [(0, frag4(udp_a(), [208])[0], FRAG),
+      (1, frag4(udp_a(), [208])[1] + bytes(60 - len(frag4(udp_a(), [208])[1])), frame())], (1, 0)),
+    ('v4_truncated_fragment_rejected', PORT, None,
+     [(0, A4[0][:-10], 'reject'), (1, A4[1], FRAG), (2, A4[2], FRAG)], (0, 1)),
+    ('v4_non_final_length_not_multiple_of_8', PORT, None,
+     [(0, frag4(udp_a(), [60])[0], 'reject'), (1, frag4(udp_a(), [60])[1], 'reject')], (0, 1)),
+    # Two "last" fragments that don't overlap but disagree on the end.
+    ('v4_conflicting_total_length', PORT, None,
+     [(0, ether(ipv4(bytes(16), ident=0x1234, frag_offset=136), 0x0800), FRAG),
+      (1, ether(ipv4(bytes(8), ident=0x1234, frag_offset=160), 0x0800), 'reject')], (0, 1)),
+    ('v4_fragment_past_end', PORT, None,
+     [(0, A4[2], FRAG), (1, ether(ipv4(bytes(8), ident=0x1234, frag_offset=216, more=True), 0x0800), 'reject')],
+     (0, 1)),
+    ('v4_datagram_too_large', PORT, None,
+     [(0, ether(ipv4(bytes(16), ident=1, frag_offset=65528, more=True), 0x0800), 'reject')], (0, 1)),
+    ('v4_buffer_full_drops_oldest', PORT, 250,
+     [(0, frag4(udp_a(), [128])[0], FRAG), (1, B4[0], FRAG), (2, B4[1], frame(BIG_B)),
+      (3, frag4(udp_a(), [128])[1], FRAG)], (1, 2)),
+    # A fragment too big for the buffer on its own is rejected without
+    # evicting other datagrams.
+    ('v4_oversized_fragment_keeps_others', PORT, 220,
+     [(0, B4[0], FRAG), (1, frag4(udp(bytes(300)), [232], ident=3)[0], 'reject'), (2, B4[1], frame(BIG_B))],
+     (1, 1)),
+    ('v4_fragment_larger_than_buffer', PORT, 100,
+     [(0, frag4(udp_a(), [128])[0], 'reject'), (1, frag4(udp_a(), [128])[1], 'reject')], (0, 1)),
+    ('v6_in_order', PORT, None,
+     [(0, A6[0], FRAG), (1, A6[1], FRAG), (2, A6[2], frame())], (1, 0)),
+    ('v6_reverse_order', PORT, None,
+     [(0, A6[2], FRAG), (1, A6[1], FRAG), (2, A6[0], frame())], (1, 0)),
+    ('v6_hop_by_hop_before_fragment', PORT, None,
+     [(0, f, FRAG if i < 1 else frame())
+      for i, f in enumerate(frag6(udp_a(), [128], before=ext_options(FRAGMENT), first=HOP_BY_HOP))], (1, 0)),
+    ('v6_destination_options_after_fragment', PORT, None,
+     [(0, f, FRAG if i < 1 else frame())
+      for i, f in enumerate(frag6(ext_options(17) + udp_a(), [128], next_header=DEST_OPTS))], (1, 0)),
+    ('v6_overlap_discards_datagram', PORT, None,
+     [(0, A6[0], FRAG), (1, frag6(udp_a(inner=BIG_B), [32, 96])[1], 'reject'), (2, A6[1], 'reject')], (0, 1)),
+    ('v6_reassembled_esp', PORT, None,
+     [(0, f, FRAG if i < 1 else 'reject')
+      for i, f in enumerate(frag6(bytes(8) + udp_a(), [128], next_header=ESP))], (1, 0)),
+    ('v6_different_ids', PORT, None,
+     [(0, A6[0], FRAG), (1, frag6(udp_a(inner=BIG_B), [128], ident=7)[0], FRAG),
+      (2, frag6(udp_a(inner=BIG_B), [128], ident=7)[1], frame(BIG_B)),
+      (3, A6[1], FRAG), (4, A6[2], frame())], (2, 0)),
+    ('v4_and_v6_same_id', PORT, None,
+     [(0, frag4(udp_a(), [128], ident=5)[0], FRAG), (1, frag6(udp_a(inner=BIG_B), [128], ident=5)[0], FRAG),
+      (2, frag4(udp_a(), [128], ident=5)[1], frame()),
+      (3, frag6(udp_a(inner=BIG_B), [128], ident=5)[1], frame(BIG_B))], (2, 0)),
+]
+
+REASSEMBLY_HEADER = '''\
+# Shared fragment reassembly test cases. GENERATED by generate_vectors.py;
+# edit that script and re-run it rather than editing this file by hand.
+#
+# Each case is a "case" line, then one "packet" line per captured frame fed
+# to a new Reassembler, then a "finish" line. Tab-separated:
+#   case    <name> <port> <max buffered bytes, or "-" for the default>
+#   packet  <capture time in ms> <hex frame> <expected>
+#           expected: "fragment" (held), "reject", or
+#                     "frame:<encapsulation>:<hex of inner frame>"
+#   finish  <reassembled> <incomplete>   (stats after finish())
+'''
+
+
 def main() -> None:
     names = [c[0] for c in CASES]
     assert len(names) == len(set(names)), 'duplicate case names'
@@ -202,6 +364,17 @@ def main() -> None:
         lines.append('\t'.join([name, function, str(port), data.hex() or '-', expected]) + '\n')
     OUT.write_text(''.join(lines))
     print(f'wrote {len(CASES)} cases to {OUT}')
+
+    names = [c[0] for c in REASSEMBLY_CASES]
+    assert len(names) == len(set(names)), 'duplicate reassembly case names'
+    lines = [REASSEMBLY_HEADER]
+    for name, port, max_buffered, packets, (reassembled, incomplete) in REASSEMBLY_CASES:
+        lines.append(f'case\t{name}\t{port}\t{"-" if max_buffered is None else max_buffered}\n')
+        for ms, data, expected in packets:
+            lines.append(f'packet\t{ms}\t{data.hex()}\t{expected}\n')
+        lines.append(f'finish\t{reassembled}\t{incomplete}\n')
+    REASSEMBLY_OUT.write_text(''.join(lines))
+    print(f'wrote {len(REASSEMBLY_CASES)} cases to {REASSEMBLY_OUT}')
 
 
 if __name__ == '__main__':

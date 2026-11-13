@@ -31,6 +31,26 @@ If the input isn't Ethernet (for example a capture taken on Linux `any`), the
 tool exits with an error without creating the output file. An input with no
 packets produces a valid, empty output file.
 
+### Fragmented datagrams
+
+The router adds IP + UDP + TZSP headers to each sniffed frame, so large frames
+(and smaller ones over tunnels) produce TZSP datagrams too big for the path
+MTU, which arrive as IP fragments. The tool reassembles them, over both IPv4
+and IPv6, before stripping:
+
+- Fragments are matched by source, destination and IP ID (IPv6: Fragment
+  header ID), and can arrive in any order.
+- The frame is written when its last missing fragment arrives, with that
+  fragment's timestamp, the same as the kernel would give it.
+- A datagram still missing fragments 30 seconds (capture time) after its first
+  one is dropped and counted as incomplete, as are any still waiting at the
+  end of the file.
+- Exact duplicate fragments are ignored. Overlapping fragments with different
+  data, conflicting lengths or a datagram over 64 KiB discard the whole
+  datagram (RFC 5722), since they can't be put back together reliably.
+- At most 64 MiB of fragments are held at once; past that, the oldest
+  incomplete datagrams are dropped.
+
 pcapng blocks that can't be used are counted as skipped: Simple Packet Blocks
 (they have no timestamp), the obsolete Packet Block, and packets referring to an
 interface that wasn't described.
@@ -84,8 +104,11 @@ tzsp_strip_rs [-p PORT] <input> <output>
 When it finishes it prints a summary:
 
 ```
-Done. 245312 packets written to clean.pcap, 17 skipped (not TZSP/unparseable), 0 skipped (non-Ethernet encapsulation)
+Done. 245312 packets written to clean.pcap, 17 skipped (not TZSP/unparseable), 0 skipped (non-Ethernet encapsulation); fragmented datagrams: 3120 reassembled, 2 incomplete (dropped)
 ```
+
+`incomplete` counts frames lost because some of their fragments never made it
+into the capture (dropped on the network, or by the capturing host).
 
 If the input can't be read to the end (for example a truncated or corrupt
 file), it prints the error and a summary of the partial output, then exits with
@@ -107,11 +130,5 @@ cargo run --release -p tzsp_strip_rs -- raw.pcapng clean.pcap
 
 ## Limitations
 
-- **No IP reassembly.** Frames over about 1,467 bytes (IPv4 transport) or
-  1,447 bytes (IPv6) make the router fragment the TZSP datagram, and the
-  fragments are skipped. Use
-  [`tzsp_ng_capture`](../../tzsp_ng_capture/README.md), or raise the MTU
-  between the router and the capture host, if the traffic has full-size
-  packets.
 - No IPv6 ESP, Ethernet only. See the
   [parent README](../README.md#shared-limitations).

@@ -14,6 +14,7 @@ use pcap_file::pcapng::blocks::interface_description::InterfaceDescriptionOption
 use pcap_file::pcapng::{Block, PcapNgReader};
 use pcap_file::{DataLink, PcapError};
 use tzsp::pcap::{PcapWriter, LINKTYPE_ETHERNET};
+use tzsp::reassembly::{Packet, Reassembler};
 
 /// Strip TZSP encapsulation from a MikroTik sniffer capture file.
 #[derive(Parser, Debug)]
@@ -186,6 +187,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a rejected input doesn't leave an empty output file behind.
     let mut output: Option<PcapWriter<BufWriter<File>>> = None;
 
+    // Reassembles TZSP datagrams the router's packets were fragmented into
+    // on the way to the capture host. Written frames get the timestamp of
+    // the fragment that completed them.
+    let mut reassembler = Reassembler::new(args.port);
+
+    let mut read: u64 = 0;
     let mut written: u64 = 0;
     let mut skipped: u64 = 0;
     let mut non_ethernet: u64 = 0;
@@ -194,14 +201,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // truncated or corrupt input) is reported and makes the tool exit
     // non-zero, rather than being mistaken for the end of the file.
     let read_error = loop {
-        let (timestamp, linktype, data) = match input.next() {
+        let item = match input.next() {
             None => break None,
             Some(Err(e)) => break Some(e),
-            Some(Ok(Item::Unusable)) => {
+            Some(Ok(item)) => item,
+        };
+        read += 1;
+        let (timestamp, linktype, data) = match item {
+            Item::Unusable => {
                 skipped += 1;
                 continue;
             }
-            Some(Ok(Item::Packet { timestamp, linktype, data })) => (timestamp, linktype, data),
+            Item::Packet { timestamp, linktype, data } => (timestamp, linktype, data),
         };
 
         // The parser assumes Ethernet framing; anything else (e.g. a Linux
@@ -211,9 +222,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(non_ethernet_message(&args.input, linktype).into());
         }
 
-        let inner = match tzsp::strip_frame(&data, args.port) {
-            Some((tzsp::ENCAP_ETHERNET, v)) => v,
-            Some((encap, _)) => {
+        let inner = match reassembler.push(timestamp, &data) {
+            Packet::Frame { encapsulation: tzsp::ENCAP_ETHERNET, data } => data,
+            Packet::Frame { encapsulation: encap, .. } => {
                 // Valid TZSP, but carrying something other than
                 // Ethernet (e.g. 802.11). The output is labelled as
                 // Ethernet, so writing it would mislabel the frame.
@@ -226,7 +237,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 non_ethernet += 1;
                 continue;
             }
-            None => {
+            // Held until the rest of its datagram arrives.
+            Packet::Fragment => continue,
+            Packet::Rejected => {
                 skipped += 1;
                 continue;
             }
@@ -236,7 +249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(out) => out,
             None => output.insert(create_output(&args.output)?),
         };
-        out.write_packet(timestamp, inner)
+        out.write_packet(timestamp, &inner)
             .map_err(|e| format!("Can't write output '{}': {}", args.output, e))?;
         written += 1;
     };
@@ -248,9 +261,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     output.flush()?;
 
+    let frags = reassembler.finish();
     let summary = format!(
-        "{} packets written to {}, {} skipped (not TZSP/unparseable), {} skipped (non-Ethernet encapsulation)",
-        written, args.output, skipped, non_ethernet,
+        "{} packets written to {}, {} skipped (not TZSP/unparseable), {} skipped (non-Ethernet encapsulation); \
+         fragmented datagrams: {} reassembled, {} incomplete (dropped)",
+        written, args.output, skipped, non_ethernet, frags.reassembled, frags.incomplete,
     );
 
     match read_error {
@@ -259,7 +274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(e) => {
-            eprintln!("Error reading '{}' after {} packets: {}", args.input, written + skipped + non_ethernet, e);
+            eprintln!("Error reading '{}' after {} packets: {}", args.input, read, e);
             eprintln!("Partial output: {}", summary);
             std::process::exit(1);
         }
