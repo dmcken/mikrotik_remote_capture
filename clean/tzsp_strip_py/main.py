@@ -5,6 +5,7 @@
 # System imports
 import argparse
 import logging
+import sys
 
 # Scapy imports
 import scapy.utils
@@ -17,6 +18,8 @@ ETHERTYPE_IPV6 = 0x86DD
 IPV4_MIN_LEN = 20
 IPV6_LEN = 40
 IPPROTO_UDP = 17
+LINKTYPE_ETHERNET = 1
+LINKTYPES_LINUX_SLL = (113, 276)  # what captures on Linux "any" use
 
 
 def _read_u16(buf: bytes, offset: int) -> int:
@@ -173,6 +176,20 @@ def _packet_time_and_linktype(cap_file, meta) -> tuple[float | None, int]:
     return meta.sec + meta.usec / frac_div, cap_file.linktype
 
 
+def _open_output(path: str) -> scapy.utils.RawPcapNgWriter:
+    '''Open the pcapng output, labelled as Ethernet, with its header written.
+
+    write_packet() (unlike write(), which we can't use here since it
+    doesn't accept sec=/preserve original packet timestamps) never
+    writes the Section Header + Interface Description preamble itself --
+    only write() does that, via write_header(). Do it ourselves, once.
+    '''
+    output_file = scapy.utils.RawPcapNgWriter(path)
+    output_file.linktype = LINKTYPE_ETHERNET
+    output_file.write_header(None)
+    return output_file
+
+
 def main() -> None:
     '''Main'''
     args = parse_argument()
@@ -190,32 +207,50 @@ def main() -> None:
     #
     # Input may be pcapng or classic pcap (see _packet_time_and_linktype);
     # output is always pcapng.
-    with scapy.utils.RawPcapNgReader(args.input) as cap_file, \
-        scapy.utils.RawPcapNgWriter(args.output) as output_file:
-        count = 0
-        skipped = 0
-        for pkt_bytes, meta in cap_file:
-            pkt_time, linktype = _packet_time_and_linktype(cap_file, meta)
+    #
+    # The writer is only opened once the first packet's link type has
+    # been checked, so a rejected input doesn't leave an empty output
+    # file behind.
+    output_file = None
+    count = 0
+    skipped = 0
+    with scapy.utils.RawPcapNgReader(args.input) as cap_file:
+        try:
+            for pkt_bytes, meta in cap_file:
+                pkt_time, linktype = _packet_time_and_linktype(cap_file, meta)
 
-            if not hasattr(output_file, 'linktype'):
-                output_file.linktype = linktype
-            # write_packet() (unlike write(), which we can't use here
-            # since it doesn't accept sec=/preserve original packet
-            # timestamps) never writes the Section Header + Interface
-            # Description preamble itself -- only write() does that,
-            # via write_header(). Do it ourselves, once.
-            if not output_file.header_present:
-                output_file.write_header(None)
+                # The parser assumes Ethernet framing; anything else
+                # (e.g. a Linux cooked capture taken on "any") would
+                # make every packet unstrippable, so stop with a clear
+                # error instead.
+                if linktype != LINKTYPE_ETHERNET:
+                    msg = (f"Input '{args.input}' has link type {linktype}; "
+                           f"only Ethernet ({LINKTYPE_ETHERNET}) is supported.")
+                    if linktype in LINKTYPES_LINUX_SLL:
+                        msg += (" It looks like it was captured on 'any'; capture on the "
+                                "specific interface that receives the TZSP stream instead.")
+                    sys.exit(msg)
 
-            cleaned = strip_tzsp(pkt_bytes, args.port)
-            if cleaned is None:
-                skipped += 1
-                continue
+                if output_file is None:
+                    output_file = _open_output(args.output)
 
-            output_file.write_packet(cleaned, sec=pkt_time)
-            count += 1
-            if count % modulus == 0:
-                logger.info(f"{count:,}")
+                cleaned = strip_tzsp(pkt_bytes, args.port)
+                if cleaned is None:
+                    skipped += 1
+                    continue
+
+                output_file.write_packet(cleaned, sec=pkt_time)
+                count += 1
+                if count % modulus == 0:
+                    logger.info(f"{count:,}")
+        finally:
+            if output_file is not None:
+                output_file.close()
+
+    if output_file is None:
+        # Input had no packets at all: still produce a valid, empty
+        # output file rather than nothing.
+        _open_output(args.output).close()
 
     logger.info(f"Completed processing {count:,} packets ({skipped:,} skipped, not TZSP/unparseable)")
 

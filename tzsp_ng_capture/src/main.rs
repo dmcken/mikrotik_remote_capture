@@ -208,6 +208,20 @@ fn generate_filename(prefix: &str) -> String {
     unique_filename(prefix, now, |p| Path::new(p).exists())
 }
 
+/// Error text for a capture interface that isn't Ethernet.
+fn non_ethernet_message(interface: &str, linktype: Linktype) -> String {
+    let name = linktype.get_name().unwrap_or_else(|_| "unknown".to_string());
+    let mut msg = format!(
+        "Interface '{}' has link type {} ({}); only Ethernet (1) is supported.",
+        interface, linktype.0, name,
+    );
+    // 113 = LINUX_SLL, 276 = LINUX_SLL2 (what the "any" device uses).
+    if linktype.0 == 113 || linktype.0 == 276 {
+        msg.push_str(" Capture on the specific interface that receives the TZSP stream instead of 'any'.");
+    }
+    msg
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
@@ -254,8 +268,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start first output file
 
+    // The parser assumes Ethernet framing on the capture interface;
+    // anything else (e.g. Linux cooked capture on "any") would make
+    // every packet unstrippable, so refuse up front instead.
+    let capture_linktype = cap.get_datalink();
+    if capture_linktype != Linktype::ETHERNET {
+        eprintln!("{}", non_ethernet_message(&args.interface, capture_linktype));
+        std::process::exit(1);
+    }
+
     // Dead capture for writing the output
-    let linktype: Linktype = cap.get_datalink();
+    let linktype = Linktype::ETHERNET;
     let mut current_filename = generate_filename(&args.output_prefix);
     let mut savefile = Capture::dead(linktype)?.savefile(&current_filename)?;
 

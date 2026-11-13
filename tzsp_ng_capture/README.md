@@ -30,6 +30,9 @@ Packets that can't be parsed as Ethernet/IP/UDP/TZSP (other ethertypes,
 truncated, malformed TZSP header) are **dropped**, not written through still wrapped. They
 are counted and reported as `unstrippable` in the stats output.
 
+The capture interface itself must be Ethernet. Others, including Linux `any`
+(cooked/SLL framing), are rejected at startup with an error.
+
 ## Installing
 
 ### Prerequisites

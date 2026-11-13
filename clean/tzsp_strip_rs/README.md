@@ -19,6 +19,9 @@ For each packet in the input file it:
 
 Packets that fail any of these checks are skipped and counted.
 
+If the input file isn't Ethernet (for example a capture taken on Linux `any`),
+the tool exits with an error before creating the output file.
+
 ## Installing
 
 ### Prerequisites
@@ -86,6 +89,6 @@ cargo run --release -- raw.pcapng clean.pcap
 
 ## Limitations
 
-- No IPv6 extension headers, Ethernet input only, no VLAN tags, no IP
+- No IPv6 extension headers, Ethernet only, no VLAN tags, no IP
   reassembly. See the
   [parent README](../README.md#shared-limitations).

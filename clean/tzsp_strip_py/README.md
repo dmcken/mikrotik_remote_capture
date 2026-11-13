@@ -24,6 +24,9 @@ For each packet in the input file it:
 
 Packets that fail any of these checks are skipped and counted.
 
+If the input isn't Ethernet (for example a capture taken on Linux `any`), the
+tool exits with an error and status 1 without creating the output file.
+
 ## Installing
 
 Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/). The only
@@ -69,6 +72,6 @@ Progress is logged every 100,000 packets, followed by a summary:
 
 - Output timestamps have microsecond resolution, and are converted through a
   float on the way. Nanosecond detail in the input is lost.
-- No IPv6 extension headers, Ethernet input only, no VLAN tags, no IP
+- No IPv6 extension headers, Ethernet only, no VLAN tags, no IP
   reassembly. See the
   [parent README](../README.md#shared-limitations).

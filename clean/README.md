@@ -28,9 +28,9 @@ wrapped.
 
 - **No IPv6 extension headers.** TZSP over IPv4 and IPv6 are both handled, but
   for IPv6, UDP must directly follow the IPv6 header.
-- **Ethernet input only.** The input must use the Ethernet link type. A capture
-  taken with `tshark -i any` uses Linux cooked (SLL) framing, and every packet
-  will be skipped without a warning.
+- **Ethernet only.** The input must use the Ethernet link type. Anything else,
+  such as a capture taken with `tshark -i any` (Linux cooked/SLL framing), is
+  rejected at startup with an error, not silently skipped.
 - **No VLAN tags.** If the capture host saw the stream on a tagged trunk, the
   packets are skipped.
 - **No IP reassembly.** If the router's TZSP datagrams were fragmented, the

@@ -1,7 +1,7 @@
 // Rust TZSP stripper
 
 use clap::Parser;
-use pcap::{Capture, Packet};
+use pcap::{Capture, Linktype, Packet};
 
 /// Strip TZSP encapsulation from a MikroTik sniffer capture file.
 #[derive(Parser, Debug)]
@@ -145,11 +145,34 @@ fn strip_tzsp(data: &[u8], tzsp_port: u16) -> Option<&[u8]> {
     Some(&tzsp[tzsp_hdr_len..])
 }
 
+/// Error text for an input file whose link type isn't Ethernet.
+fn non_ethernet_message(input: &str, linktype: Linktype) -> String {
+    let name = linktype.get_name().unwrap_or_else(|_| "unknown".to_string());
+    let mut msg = format!(
+        "Input '{}' has link type {} ({}); only Ethernet (1) is supported.",
+        input, linktype.0, name,
+    );
+    // 113 = LINUX_SLL, 276 = LINUX_SLL2 (what the "any" device uses).
+    if linktype.0 == 113 || linktype.0 == 276 {
+        msg.push_str(" It looks like it was captured on 'any'; capture on the specific interface that receives the TZSP stream instead.");
+    }
+    msg
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let mut cap = Capture::from_file(&args.input)
         .map_err(|e| format!("Can't open input '{}': {}", args.input, e))?;
+
+    // The parser assumes Ethernet framing; anything else (e.g. a Linux
+    // cooked capture taken on "any") would make every packet
+    // unstrippable, so refuse up front instead.
+    let linktype = cap.get_datalink();
+    if linktype != Linktype::ETHERNET {
+        return Err(non_ethernet_message(&args.input, linktype).into());
+    }
+
     let mut output = cap
         .savefile(&args.output)
         .map_err(|e| format!("Can't create output '{}': {}", args.output, e))?;
