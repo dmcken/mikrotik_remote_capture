@@ -17,8 +17,10 @@ from an existing capture after the fact).
    tagged fields such as padding) and keeps only the encapsulated frame.
 3. Writes the stripped frame to the current output file, keeping the original
    capture timestamp.
-4. When the bytes written to the current file reach `--max-size`, it closes it
-   and starts a new one.
+4. If writing the next packet would take the current file past `--max-size`
+   (counting the real on-disk size, including pcap headers), it closes the file
+   and starts a new one first. Files therefore never exceed `--max-size`, unless
+   a single packet is larger than the limit by itself.
 5. On Ctrl-C it flushes the current file and prints the final libpcap stats.
 
 If capturing keeps failing (for example the interface goes down or is
@@ -139,6 +141,4 @@ version accepts IPv6 for `streaming-server`.
   is written truncated and the rest are dropped.
 - VLAN-tagged frames are not handled. The capture host must receive the stream
   untagged.
-- The rotation size counts only the stripped packet bytes, not pcap
-  per-packet headers, so files end up slightly larger than `--max-size`.
 - Output is classic pcap (`.pcap`), not pcapng.

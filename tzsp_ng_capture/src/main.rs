@@ -331,7 +331,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // End CTRL-C handler
 
     println!("Capturing UDP packets on port 37008 on {}...", &args.interface);
-    let mut current_file_size: u64 = 0;
+    // Bytes on disk in the current file: the pcap file header plus a
+    // record header and the data for each packet written.
+    const PCAP_FILE_HEADER_LEN: u64 = 24;
+    const PCAP_RECORD_HEADER_LEN: u64 = 16;
+    let mut current_file_size: u64 = PCAP_FILE_HEADER_LEN;
     let mut unstrippable_count: u64 = 0;
     let mut unsupported_encap_count: u64 = 0;
 
@@ -354,6 +358,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 consecutive_errors = 0;
                 match strip_tzsp(packet.data) {
                     Some((TZSP_ENCAP_ETHERNET, stripped)) => {
+                        // Rotate *before* a write that would take the
+                        // file past --max-size, so files never exceed it
+                        // (unless one packet alone is bigger than the
+                        // limit, in which case it gets a file to itself).
+                        let record_len = PCAP_RECORD_HEADER_LEN + stripped.len() as u64;
+                        let rotated = current_file_size + record_len > max_file_size
+                            && current_file_size > PCAP_FILE_HEADER_LEN;
+                        if rotated {
+                            println!("Rotating file: {}", &current_filename);
+                            savefile.flush()?;
+                            current_filename = generate_filename(&args.output_prefix);
+                            savefile = Capture::dead(linktype)?.savefile(&current_filename)?;
+                            current_file_size = PCAP_FILE_HEADER_LEN;
+                        }
+
                         // Calculate new packet header and write
                         let mut new_header = *packet.header;
                         new_header.caplen = stripped.len() as u32;
@@ -363,20 +382,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             header: &new_header,
                             data: stripped,
                         });
+                        current_file_size += record_len;
 
-                        // Update file size counter, rotate if needed
-                        current_file_size += stripped.len() as u64;
-                        if current_file_size >= max_file_size {
-                            println!("Rotating file: {}", &current_filename);
-                            savefile.flush()?;
-                            current_filename = generate_filename(&args.output_prefix);
-                            savefile = Capture::dead(linktype)?.savefile(&current_filename)?;
-                            current_file_size = 0;
-
-                            // libpcap's own drop counters (kernel/if
-                            // buffer overflow) -- the only way to know
-                            // after the fact whether a long capture
-                            // actually missed packets under load.
+                        // libpcap's own drop counters (kernel/if buffer
+                        // overflow) -- the only way to know after the
+                        // fact whether a long capture actually missed
+                        // packets under load. Printed here, after the
+                        // write, since stats() needs `cap` again and
+                        // `stripped` borrows from the current packet.
+                        if rotated {
                             if let Ok(stats) = cap.stats() {
                                 println!(
                                     "Capture stats so far: received={} dropped={} if_dropped={}, unstrippable={}, non_ethernet_encap={}",
