@@ -21,6 +21,16 @@ IPPROTO_UDP = 17
 LINKTYPE_ETHERNET = 1
 LINKTYPES_LINUX_SLL = (113, 276)  # what captures on Linux "any" use
 
+# TZSP encapsulation values (bytes 2-3 of the TZSP header). Only
+# Ethernet is written, since the output is labelled as Ethernet.
+TZSP_ENCAP_ETHERNET = 1
+TZSP_ENCAP_NAMES = {
+    1: 'Ethernet',
+    18: 'IEEE 802.11',
+    119: 'Prism header',
+    127: '802.11 AVS',
+}
+
 
 def _read_u16(buf: bytes, offset: int) -> int:
     return (buf[offset] << 8) | buf[offset + 1]
@@ -66,10 +76,13 @@ def parse_tzsp_header(buf: bytes) -> int | None:
     return None
 
 
-def strip_tzsp(data: bytes, tzsp_port: int) -> bytes | None:
+def strip_tzsp(data: bytes, tzsp_port: int) -> tuple[int, bytes] | None:
     '''Strip TZSP/UDP/IP/Ethernet headers from a raw captured frame.
 
-    Handles TZSP carried over either IPv4 or IPv6. Returns None
+    Handles TZSP carried over either IPv4 or IPv6. On success returns
+    (encapsulation, inner_frame), where encapsulation is the TZSP
+    encapsulation type (1 = Ethernet, 18 = 802.11, ...) that callers
+    must check before writing the frame. Returns None
     whenever the frame isn't a recognisable Ethernet/IPv4-or-IPv6/UDP/
     TZSP packet on tzsp_port, or its TZSP header can't be walked
     cleanly -- callers should skip these rather than writing them
@@ -124,7 +137,10 @@ def strip_tzsp(data: bytes, tzsp_port: int) -> bytes | None:
     if tzsp_hdr_len is None or tzsp_hdr_len >= len(tzsp):
         return None
 
-    return tzsp[tzsp_hdr_len:]
+    # parse_tzsp_header() guarantees the 4-byte fixed header exists.
+    encapsulation = _read_u16(tzsp, 2)
+
+    return encapsulation, tzsp[tzsp_hdr_len:]
 
 
 def parse_argument() -> argparse.Namespace:
@@ -214,6 +230,7 @@ def main() -> None:
     output_file = None
     count = 0
     skipped = 0
+    non_ethernet = 0
     with scapy.utils.RawPcapNgReader(args.input) as cap_file:
         try:
             for pkt_bytes, meta in cap_file:
@@ -234,9 +251,22 @@ def main() -> None:
                 if output_file is None:
                     output_file = _open_output(args.output)
 
-                cleaned = strip_tzsp(pkt_bytes, args.port)
-                if cleaned is None:
+                result = strip_tzsp(pkt_bytes, args.port)
+                if result is None:
                     skipped += 1
+                    continue
+
+                encapsulation, cleaned = result
+                if encapsulation != TZSP_ENCAP_ETHERNET:
+                    # Valid TZSP, but carrying something other than Ethernet
+                    # (e.g. 802.11). The output is labelled as Ethernet, so
+                    # writing it would mislabel the frame.
+                    if non_ethernet == 0:
+                        logger.warning(
+                            "Skipping TZSP packets with non-Ethernet encapsulation "
+                            f"{encapsulation} ({TZSP_ENCAP_NAMES.get(encapsulation, 'unknown')}); "
+                            f"only Ethernet ({TZSP_ENCAP_ETHERNET}) is supported")
+                    non_ethernet += 1
                     continue
 
                 output_file.write_packet(cleaned, sec=pkt_time)
@@ -252,7 +282,8 @@ def main() -> None:
         # output file rather than nothing.
         _open_output(args.output).close()
 
-    logger.info(f"Completed processing {count:,} packets ({skipped:,} skipped, not TZSP/unparseable)")
+    logger.info(f"Completed processing {count:,} packets ({skipped:,} skipped, not TZSP/unparseable; "
+                f"{non_ethernet:,} skipped, non-Ethernet encapsulation)")
 
 if __name__ == '__main__':
     main()

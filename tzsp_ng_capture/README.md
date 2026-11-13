@@ -30,6 +30,12 @@ Packets that can't be parsed as Ethernet/IP/UDP/TZSP (other ethertypes,
 truncated, malformed TZSP header) are **dropped**, not written through still wrapped. They
 are counted and reported as `unstrippable` in the stats output.
 
+Only TZSP packets carrying Ethernet frames are written. Packets whose TZSP
+header says they carry something else (e.g. 802.11 from sniffing a wireless
+interface) are dropped, reported as `non_ethernet_encap`, and trigger a
+warning when the first one is seen. The output file is labelled as Ethernet,
+so writing them would mislabel the frames.
+
 The capture interface itself must be Ethernet. Others, including Linux `any`
 (cooked/SLL framing), are rejected at startup with an error.
 
@@ -100,10 +106,10 @@ Stop with Ctrl-C. Example output:
 ```
 Capturing UDP packets on port 37008 on eth0...
 Rotating file: router1_1763025120.pcap
-Capture stats so far: received=812345 dropped=0 if_dropped=0, unstrippable=0
+Capture stats so far: received=812345 dropped=0 if_dropped=0, unstrippable=0, non_ethernet_encap=0
 ^C
 Ctrl-C received, shutting down...
-Final capture stats: received=901234 dropped=0 if_dropped=0, unstrippable=0
+Final capture stats: received=901234 dropped=0 if_dropped=0, unstrippable=0, non_ethernet_encap=0
 Exiting cleanly...
 ```
 

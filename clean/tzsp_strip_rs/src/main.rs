@@ -64,7 +64,15 @@ fn parse_tzsp_header(buf: &[u8]) -> Option<usize> {
     None
 }
 
+/// TZSP encapsulation value for Ethernet frames -- the only one these
+/// tools write, since the output file is labelled as Ethernet.
+const TZSP_ENCAP_ETHERNET: u16 = 1;
+
 /// Strip TZSP headers from a packet, if present.
+///
+/// On success returns the TZSP encapsulation type (bytes 2-3 of the
+/// TZSP header, e.g. 1 = Ethernet, 18 = 802.11) and the inner frame;
+/// callers must check the encapsulation before writing the frame.
 ///
 /// Returns `None` (never the original, still-wrapped packet) whenever
 /// the frame isn't a recognisable Ethernet/IPv4-or-IPv6/UDP/TZSP
@@ -73,7 +81,7 @@ fn parse_tzsp_header(buf: &[u8]) -> Option<usize> {
 /// "cleaned" capture, which would otherwise silently reintroduce the
 /// TZSP/IP/Ethernet wrapper for exactly the packets most likely to
 /// confuse downstream analysis.
-fn strip_tzsp(data: &[u8], tzsp_port: u16) -> Option<&[u8]> {
+fn strip_tzsp(data: &[u8], tzsp_port: u16) -> Option<(u16, &[u8])> {
     const ETHER_LEN: usize = 14;
     const ETHERTYPE_IPV4: u16 = 0x0800;
     const ETHERTYPE_IPV6: u16 = 0x86DD;
@@ -142,7 +150,21 @@ fn strip_tzsp(data: &[u8], tzsp_port: u16) -> Option<&[u8]> {
         return None;
     }
 
-    Some(&tzsp[tzsp_hdr_len..])
+    // parse_tzsp_header() guarantees the 4-byte fixed header exists.
+    let encapsulation = read_u16(&tzsp[2..4]);
+
+    Some((encapsulation, &tzsp[tzsp_hdr_len..]))
+}
+
+/// Human-readable name for a TZSP encapsulation value.
+fn tzsp_encap_name(encap: u16) -> &'static str {
+    match encap {
+        1 => "Ethernet",
+        18 => "IEEE 802.11",
+        119 => "Prism header",
+        127 => "802.11 AVS",
+        _ => "unknown",
+    }
 }
 
 /// Error text for an input file whose link type isn't Ethernet.
@@ -179,6 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut written: u64 = 0;
     let mut skipped: u64 = 0;
+    let mut non_ethernet: u64 = 0;
 
     // Loop until a clean end of file. Any other read error (e.g. a
     // truncated or corrupt input) is reported and makes the tool exit
@@ -191,7 +214,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let inner = match strip_tzsp(packet.data, args.port) {
-            Some(v) => v,
+            Some((TZSP_ENCAP_ETHERNET, v)) => v,
+            Some((encap, _)) => {
+                // Valid TZSP, but carrying something other than
+                // Ethernet (e.g. 802.11). The output is labelled as
+                // Ethernet, so writing it would mislabel the frame.
+                if non_ethernet == 0 {
+                    eprintln!(
+                        "Warning: skipping TZSP packets with non-Ethernet encapsulation {} ({}); only Ethernet (1) is supported",
+                        encap, tzsp_encap_name(encap),
+                    );
+                }
+                non_ethernet += 1;
+                continue;
+            }
             None => {
                 skipped += 1;
                 continue;
@@ -218,8 +254,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     output.flush()?;
 
     let summary = format!(
-        "{} packets written to {}, {} skipped (not TZSP/unparseable)",
-        written, args.output, skipped,
+        "{} packets written to {}, {} skipped (not TZSP/unparseable), {} skipped (non-Ethernet encapsulation)",
+        written, args.output, skipped, non_ethernet,
     );
 
     match read_error {
@@ -228,7 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(e) => {
-            eprintln!("Error reading '{}' after {} packets: {}", args.input, written + skipped, e);
+            eprintln!("Error reading '{}' after {} packets: {}", args.input, written + skipped + non_ethernet, e);
             eprintln!("Partial output: {}", summary);
             std::process::exit(1);
         }
@@ -242,7 +278,13 @@ mod tests {
     /// TZSP header (version 1, type 0 "received", encap 1 Ethernet)
     /// with a PADDING tag then END, followed by the inner frame.
     fn tzsp_payload(inner: &[u8]) -> Vec<u8> {
-        let mut v = vec![0x01, 0x00, 0x00, 0x01, 0x00, 0x01];
+        tzsp_payload_encap(TZSP_ENCAP_ETHERNET, inner)
+    }
+
+    fn tzsp_payload_encap(encap: u16, inner: &[u8]) -> Vec<u8> {
+        let mut v = vec![0x01, 0x00];
+        v.extend_from_slice(&encap.to_be_bytes());
+        v.extend_from_slice(&[0x00, 0x01]); // PADDING, END
         v.extend_from_slice(inner);
         v
     }
@@ -286,13 +328,13 @@ mod tests {
     #[test]
     fn strips_ipv4() {
         let pkt = ether(0x0800, &ipv4(17, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt, 37008), Some(INNER));
+        assert_eq!(strip_tzsp(&pkt, 37008), Some((TZSP_ENCAP_ETHERNET, INNER)));
     }
 
     #[test]
     fn strips_ipv6() {
         let pkt = ether(0x86DD, &ipv6(17, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt, 37008), Some(INNER));
+        assert_eq!(strip_tzsp(&pkt, 37008), Some((TZSP_ENCAP_ETHERNET, INNER)));
     }
 
     #[test]
@@ -330,7 +372,14 @@ mod tests {
     #[test]
     fn honours_custom_port() {
         let pkt = ether(0x86DD, &ipv6(17, &udp(5000, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt, 5000), Some(INNER));
+        assert_eq!(strip_tzsp(&pkt, 5000), Some((TZSP_ENCAP_ETHERNET, INNER)));
         assert_eq!(strip_tzsp(&pkt, 37008), None);
+    }
+
+    #[test]
+    fn returns_non_ethernet_encapsulation() {
+        // 18 = IEEE 802.11; returned as-is for the caller to reject.
+        let pkt = ether(0x0800, &ipv4(17, &udp(37008, &tzsp_payload_encap(18, INNER))));
+        assert_eq!(strip_tzsp(&pkt, 37008), Some((18, INNER)));
     }
 }

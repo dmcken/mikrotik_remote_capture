@@ -31,6 +31,11 @@ wrapped.
 - **Ethernet only.** The input must use the Ethernet link type. Anything else,
   such as a capture taken with `tshark -i any` (Linux cooked/SLL framing), is
   rejected at startup with an error, not silently skipped.
+- **Ethernet-in-TZSP only.** The TZSP header says what kind of frame it
+  carries. Only Ethernet (1) is written. Other types, such as 802.11 from
+  sniffing a wireless interface, are skipped and counted separately, with a
+  warning when the first one is seen. The output file can only be labelled with
+  one link type, so mixing them would mislabel frames.
 - **No VLAN tags.** If the capture host saw the stream on a tagged trunk, the
   packets are skipped.
 - **No IP reassembly.** If the router's TZSP datagrams were fragmented, the
@@ -42,7 +47,7 @@ Test using a 1GB pcap file:
 
 ```bash
 time ./target/release/tzsp_strip_rs input.pcap output.pcap
-Done. Extracted packets are in output.pcap
+Done. <n> packets written to output.pcap, <n> skipped (not TZSP/unparseable), <n> skipped (non-Ethernet encapsulation)
 
 real    0m3.677s
 user    0m0.639s

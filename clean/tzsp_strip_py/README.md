@@ -22,7 +22,9 @@ For each packet in the input file it:
 4. Writes everything after the TZSP header to the output, keeping the original
    timestamp.
 
-Packets that fail any of these checks are skipped and counted.
+Packets that fail any of these checks are skipped and counted. Packets whose
+TZSP header says they carry something other than Ethernet (e.g. 802.11) are
+skipped and counted separately, with a warning when the first one is seen.
 
 If the input isn't Ethernet (for example a capture taken on Linux `any`), the
 tool exits with an error and status 1 without creating the output file.
@@ -65,7 +67,7 @@ Progress is logged every 100,000 packets, followed by a summary:
 ```
 ... - INFO - 100,000
 ... - INFO - 200,000
-... - INFO - Completed processing 245,312 packets (17 skipped, not TZSP/unparseable)
+... - INFO - Completed processing 245,312 packets (17 skipped, not TZSP/unparseable; 0 skipped, non-Ethernet encapsulation)
 ```
 
 ## Limitations

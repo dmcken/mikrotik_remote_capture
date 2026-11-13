@@ -17,7 +17,9 @@ For each packet in the input file it:
 4. Writes everything after the TZSP header to the output, setting the packet
    length to the stripped size.
 
-Packets that fail any of these checks are skipped and counted.
+Packets that fail any of these checks are skipped and counted. Packets whose
+TZSP header says they carry something other than Ethernet (e.g. 802.11) are
+skipped and counted separately, with a warning when the first one is seen.
 
 If the input file isn't Ethernet (for example a capture taken on Linux `any`),
 the tool exits with an error before creating the output file.
@@ -66,7 +68,7 @@ tzsp_strip_rs [-p PORT] <input> <output>
 When it finishes it prints a summary:
 
 ```
-Done. 245312 packets written to clean.pcap, 17 skipped (not TZSP/unparseable)
+Done. 245312 packets written to clean.pcap, 17 skipped (not TZSP/unparseable), 0 skipped (non-Ethernet encapsulation)
 ```
 
 If the input can't be read to the end (for example a truncated or corrupt

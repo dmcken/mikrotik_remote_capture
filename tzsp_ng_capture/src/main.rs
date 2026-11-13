@@ -76,7 +76,15 @@ fn parse_tzsp_header(buf: &[u8]) -> Option<usize> {
     None
 }
 
+/// TZSP encapsulation value for Ethernet frames -- the only one these
+/// tools write, since the output file is labelled as Ethernet.
+const TZSP_ENCAP_ETHERNET: u16 = 1;
+
 /// Strip TZSP headers from a packet, if present.
+///
+/// On success returns the TZSP encapsulation type (bytes 2-3 of the
+/// TZSP header, e.g. 1 = Ethernet, 18 = 802.11) and the inner frame;
+/// callers must check the encapsulation before writing the frame.
 ///
 /// Returns `None` (never the original, still-wrapped packet) whenever
 /// the frame isn't a recognisable Ethernet/IPv4-or-IPv6/UDP/TZSP
@@ -85,7 +93,7 @@ fn parse_tzsp_header(buf: &[u8]) -> Option<usize> {
 /// "cleaned" capture, which would otherwise silently reintroduce the
 /// TZSP/IP/Ethernet wrapper for exactly the packets most likely to
 /// confuse downstream analysis.
-fn strip_tzsp(data: &[u8]) -> Option<&[u8]> {
+fn strip_tzsp(data: &[u8]) -> Option<(u16, &[u8])> {
     const ETHER_LEN: usize = 14;
     const ETHERTYPE_IPV4: u16 = 0x0800;
     const ETHERTYPE_IPV6: u16 = 0x86DD;
@@ -155,7 +163,10 @@ fn strip_tzsp(data: &[u8]) -> Option<&[u8]> {
         return None;
     }
 
-    Some(&tzsp[tzsp_hdr_len..])
+    // parse_tzsp_header() guarantees the 4-byte fixed header exists.
+    let encapsulation = read_u16(&tzsp[2..4]);
+
+    Some((encapsulation, &tzsp[tzsp_hdr_len..]))
 }
 
 fn parse_size(input: &str) -> Result<u64, String> {
@@ -206,6 +217,17 @@ fn generate_filename(prefix: &str) -> String {
         .unwrap()
         .as_secs();
     unique_filename(prefix, now, |p| Path::new(p).exists())
+}
+
+/// Human-readable name for a TZSP encapsulation value.
+fn tzsp_encap_name(encap: u16) -> &'static str {
+    match encap {
+        1 => "Ethernet",
+        18 => "IEEE 802.11",
+        119 => "Prism header",
+        127 => "802.11 AVS",
+        _ => "unknown",
+    }
 }
 
 /// Error text for a capture interface that isn't Ethernet.
@@ -277,7 +299,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    // Dead capture for writing the output
+    // Dead capture for writing the output. Only Ethernet-encapsulated
+    // TZSP frames are written, so the output is Ethernet too.
     let linktype = Linktype::ETHERNET;
     let mut current_filename = generate_filename(&args.output_prefix);
     let mut savefile = Capture::dead(linktype)?.savefile(&current_filename)?;
@@ -295,6 +318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Capturing UDP packets on port 37008 on {}...", &args.interface);
     let mut current_file_size: u64 = 0;
     let mut unstrippable_count: u64 = 0;
+    let mut unsupported_encap_count: u64 = 0;
 
     // Persistent capture errors (interface gone down/removed, etc.)
     // would otherwise make next_packet() fail instantly in a tight
@@ -314,7 +338,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(packet) => {
                 consecutive_errors = 0;
                 match strip_tzsp(packet.data) {
-                    Some(stripped) => {
+                    Some((TZSP_ENCAP_ETHERNET, stripped)) => {
                         // Calculate new packet header and write
                         let mut new_header = *packet.header;
                         new_header.caplen = stripped.len() as u32;
@@ -340,11 +364,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // actually missed packets under load.
                             if let Ok(stats) = cap.stats() {
                                 println!(
-                                    "Capture stats so far: received={} dropped={} if_dropped={}, unstrippable={}",
+                                    "Capture stats so far: received={} dropped={} if_dropped={}, unstrippable={}, non_ethernet_encap={}",
                                     stats.received, stats.dropped, stats.if_dropped, unstrippable_count,
+                                    unsupported_encap_count,
                                 );
                             }
                         }
+                    }
+                    Some((encap, _)) => {
+                        // Valid TZSP, but carrying something other
+                        // than Ethernet (e.g. 802.11). Writing it into
+                        // an Ethernet-labelled file would mislabel it.
+                        if unsupported_encap_count == 0 {
+                            eprintln!(
+                                "Warning: skipping TZSP packets with non-Ethernet encapsulation {} ({}); only Ethernet (1) is supported",
+                                encap, tzsp_encap_name(encap),
+                            );
+                        }
+                        unsupported_encap_count += 1;
                     }
                     None => {
                         // Not a strippable TZSP/UDP/IPv4/Ethernet
@@ -381,8 +418,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     savefile.flush()?;
     if let Ok(stats) = cap.stats() {
         println!(
-            "Final capture stats: received={} dropped={} if_dropped={}, unstrippable={}",
+            "Final capture stats: received={} dropped={} if_dropped={}, unstrippable={}, non_ethernet_encap={}",
             stats.received, stats.dropped, stats.if_dropped, unstrippable_count,
+            unsupported_encap_count,
         );
     }
 
@@ -405,7 +443,13 @@ mod tests {
     /// TZSP header (version 1, type 0 "received", encap 1 Ethernet)
     /// with a PADDING tag then END, followed by the inner frame.
     fn tzsp_payload(inner: &[u8]) -> Vec<u8> {
-        let mut v = vec![0x01, 0x00, 0x00, 0x01, 0x00, 0x01];
+        tzsp_payload_encap(TZSP_ENCAP_ETHERNET, inner)
+    }
+
+    fn tzsp_payload_encap(encap: u16, inner: &[u8]) -> Vec<u8> {
+        let mut v = vec![0x01, 0x00];
+        v.extend_from_slice(&encap.to_be_bytes());
+        v.extend_from_slice(&[0x00, 0x01]); // PADDING, END
         v.extend_from_slice(inner);
         v
     }
@@ -449,13 +493,13 @@ mod tests {
     #[test]
     fn strips_ipv4() {
         let pkt = ether(0x0800, &ipv4(17, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), Some(INNER));
+        assert_eq!(strip_tzsp(&pkt), Some((TZSP_ENCAP_ETHERNET, INNER)));
     }
 
     #[test]
     fn strips_ipv6() {
         let pkt = ether(0x86DD, &ipv6(17, &udp(37008, &tzsp_payload(INNER))));
-        assert_eq!(strip_tzsp(&pkt), Some(INNER));
+        assert_eq!(strip_tzsp(&pkt), Some((TZSP_ENCAP_ETHERNET, INNER)));
     }
 
     #[test]
@@ -506,5 +550,12 @@ mod tests {
     fn filename_keeps_directory_prefix() {
         let name = unique_filename("/data/caps/site1", 1700, |p| p == "/data/caps/site1_1700.pcap");
         assert_eq!(name, "/data/caps/site1_1700_1.pcap");
+    }
+
+    #[test]
+    fn returns_non_ethernet_encapsulation() {
+        // 18 = IEEE 802.11; returned as-is for the caller to reject.
+        let pkt = ether(0x0800, &ipv4(17, &udp(37008, &tzsp_payload_encap(18, INNER))));
+        assert_eq!(strip_tzsp(&pkt), Some((18, INNER)));
     }
 }
