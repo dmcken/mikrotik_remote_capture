@@ -26,7 +26,7 @@ Or with automatic rotation:
 tshark -f "udp port 37008" -w SIL-issues.pcap -b filesize:1048576
 ```
 
-This leaves the TZSP headers in place however, to use more advanced tools you would want the strip those headers (Frame -> Ethernet -> IP -> UDP).
+This leaves the TZSP headers in place however, to use more advanced tools you would want to strip those headers (Frame -> Ethernet -> IP -> UDP).
 
 
 ## Tools
