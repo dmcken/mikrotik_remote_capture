@@ -35,6 +35,7 @@ This leaves the TZSP headers in place however, to use more advanced tools you wo
 * tzsp_ng_capture/ is a rust program that receives the stream on a UDP socket (no root or libpcap needed) and strips the header before writing to disk.
 * tzsp/ is the TZSP parsing library shared by the rust tools.
 * testdata/ holds parser test cases shared by the rust and python implementations.
+* [TESTING.md](TESTING.md) covers the automated tests and a checklist for testing on a live network.
 
 ### Prebuilt binaries
 
