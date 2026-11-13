@@ -31,7 +31,7 @@ tool exits with an error and status 1 without creating the output file.
 
 ## Installing
 
-Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/). The only
+Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/). The only
 dependency is scapy.
 
 ```bash
