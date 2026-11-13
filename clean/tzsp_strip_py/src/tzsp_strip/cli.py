@@ -4,6 +4,7 @@
 
 # System imports
 import argparse
+import importlib.metadata
 import logging
 import sys
 
@@ -159,7 +160,7 @@ def parse_argument() -> argparse.Namespace:
         argparse.Namespace: The parsed arguments.
     """
     parser = argparse.ArgumentParser(
-                    prog='tzsp_strip_py',
+                    prog='tzsp-strip',
                     description='Strip the Ethernet/IP/UDP/TZSP wrapper from a MikroTik '
                                 'sniffer capture, writing only the original frames.',
                     epilog='Input may be pcap or pcapng; output is always pcapng.')
@@ -169,6 +170,8 @@ def parse_argument() -> argparse.Namespace:
 
     parser.add_argument('-p', '--port', default=37008, type=int,
                         help='UDP destination port the TZSP stream was sent to (default: %(default)s)')
+    parser.add_argument('-V', '--version', action='version',
+                        version=f"%(prog)s {importlib.metadata.version('tzsp-strip')}")
 
     args = parser.parse_args()
 

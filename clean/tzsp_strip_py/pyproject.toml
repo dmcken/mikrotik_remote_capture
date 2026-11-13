@@ -1,5 +1,5 @@
 [project]
-name = "tzsp-strip-py"
+name = "tzsp-strip"
 version = "0.1.0"
 description = "Strip TZSP encapsulation from MikroTik sniffer capture files"
 readme = "README.md"
@@ -9,7 +9,8 @@ dependencies = [
 ]
 
 [project.scripts]
-tzsp_strip_py = "main:main"
+tzsp-strip = "tzsp_strip.cli:main"
 
-[tool.uv]
-package = true
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12"]
+build-backend = "uv_build"

@@ -29,23 +29,50 @@ skipped and counted separately, with a warning when the first one is seen.
 If the input isn't Ethernet (for example a capture taken on Linux `any`), the
 tool exits with an error and status 1 without creating the output file.
 
-## Installing
+## Running it
 
-Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/). The only
-dependency is scapy.
+Requires [uv](https://docs.astral.sh/uv/). uv fetches a suitable Python
+(3.10+) and the only dependency, scapy, by itself.
+
+### With uvx (no checkout needed)
+
+Run it straight from GitHub:
+
+```bash
+uvx --from "git+https://github.com/dmcken/mikrotik_remote_capture#subdirectory=clean/tzsp_strip_py" \
+    tzsp-strip raw.pcapng clean.pcapng
+```
+
+uv caches the build, so later runs start immediately. Add `@<tag-or-commit>`
+after the repo URL to pin a version, e.g.
+`git+https://github.com/dmcken/mikrotik_remote_capture@v0.2.0#subdirectory=clean/tzsp_strip_py`.
+
+To keep `tzsp-strip` on your `PATH` instead:
+
+```bash
+uv tool install "git+https://github.com/dmcken/mikrotik_remote_capture#subdirectory=clean/tzsp_strip_py"
+tzsp-strip raw.pcapng clean.pcapng
+uv tool upgrade tzsp-strip      # later, to pick up changes
+```
+
+From a checkout, `uvx --from ./clean/tzsp_strip_py tzsp-strip ...` works the
+same way.
+
+### For development
 
 ```bash
 cd clean/tzsp_strip_py
 uv sync
+uv run tzsp-strip raw.pcapng clean.pcapng
 ```
 
-This creates `.venv/` with scapy and installs the `tzsp_strip_py` command into
-it.
+The code is in `src/tzsp_strip/cli.py`. `uv run` always uses the working
+copy, so edits take effect without reinstalling.
 
 ## Usage
 
 ```
-uv run tzsp_strip_py [-p PORT] <input> <output>
+tzsp-strip [-p PORT] <input> <output>
 ```
 
 | Argument / flag | Default | Description |
@@ -53,13 +80,14 @@ uv run tzsp_strip_py [-p PORT] <input> <output>
 | `<input>` | *(required)* | Capture to clean: pcapng or classic pcap (microsecond or nanosecond timestamps). |
 | `<output>` | *(required)* | File to write. Always pcapng, whatever the input format. Overwritten if it exists. |
 | `-p`, `--port PORT` | `37008` | UDP destination port the TZSP stream was sent to. |
+| `-V`, `--version` | | Show version. |
 | `-h`, `--help` | | Show help. |
 
 ### Example
 
 ```bash
 tshark -f "udp port 37008" -w raw.pcapng       # capture the stream
-uv run tzsp_strip_py raw.pcapng clean.pcapng
+tzsp-strip raw.pcapng clean.pcapng
 ```
 
 Progress is logged every 100,000 packets, followed by a summary:

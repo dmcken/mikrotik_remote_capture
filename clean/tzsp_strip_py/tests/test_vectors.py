@@ -9,7 +9,7 @@ drift apart unnoticed. Run with:
 import unittest
 from pathlib import Path
 
-import main
+from tzsp_strip import cli
 
 VECTORS = Path(__file__).resolve().parents[3] / 'testdata' / 'tzsp_vectors.tsv'
 
@@ -36,9 +36,9 @@ class SharedVectors(unittest.TestCase):
         for name, function, port, data, want in cases:
             with self.subTest(name=name):
                 if function == 'strip':
-                    got = main.strip_tzsp_payload(data)
+                    got = cli.strip_tzsp_payload(data)
                 elif function == 'strip_frame':
-                    got = main.strip_tzsp(data, port)
+                    got = cli.strip_tzsp(data, port)
                 else:
                     self.fail(f'unknown function {function}')
                 self.assertEqual(got, want)
