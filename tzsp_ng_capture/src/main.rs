@@ -247,7 +247,6 @@ fn non_ethernet_message(interface: &str, linktype: Linktype) -> String {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
-    println!("{:?}", args);
 
     // Size to grow to before rotating
     let max_file_size: u64 = parse_size(&args.max_size)?;
