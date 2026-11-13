@@ -1,0 +1,31 @@
+# Run the Rust and Python tests on every push and pull request.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clean/tzsp_strip_py
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --locked python -m unittest discover -s tests -v
+      # The package must build, since uvx installs it from the repo.
+      - run: uv build

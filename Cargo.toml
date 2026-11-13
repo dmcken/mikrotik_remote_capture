@@ -5,3 +5,7 @@ members = [
     "tzsp_ng_capture",
     "clean/tzsp_strip_rs",
 ]
+
+# Smaller release binaries; debug symbols aren't shipped.
+[profile.release]
+strip = true

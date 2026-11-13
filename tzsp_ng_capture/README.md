@@ -44,6 +44,11 @@ successful receive resets the count, so brief problems don't stop the capture.
 
 ## Installing
 
+Static Linux binaries for x86-64 and arm64 are attached to each
+[release](https://github.com/dmcken/mikrotik_remote_capture/releases); see
+[Prebuilt binaries](../README.md#prebuilt-binaries). To build from source
+instead:
+
 ### Prerequisites
 
 - Linux.

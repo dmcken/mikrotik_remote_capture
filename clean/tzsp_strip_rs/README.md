@@ -36,6 +36,11 @@ interface that wasn't described.
 
 ## Installing
 
+Static Linux binaries for x86-64 and arm64 are attached to each
+[release](https://github.com/dmcken/mikrotik_remote_capture/releases); see
+[Prebuilt binaries](../../README.md#prebuilt-binaries). To build from source
+instead:
+
 ### Prerequisites
 
 Just a Rust toolchain (`cargo`) supporting edition 2024 (Rust 1.85 or newer),
