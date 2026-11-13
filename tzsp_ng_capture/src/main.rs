@@ -46,8 +46,17 @@ fn parse_tzsp_header(buf: &[u8]) -> Option<usize> {
         offset += 1;
 
         if tag == 1 {
-            // END tag
+            // END tag -- zero-length, no value byte follows.
             return Some(offset);
+        }
+
+        if tag == 0 {
+            // PADDING tag -- also zero-length (no length byte of its
+            // own), unlike every other tag. Treating it like a normal
+            // tagged field (as before) reads the next tag's type byte
+            // as a bogus length and desyncs the rest of the walk --
+            // RouterOS's sniffer does emit this tag for alignment.
+            continue;
         }
 
         if offset >= buf.len() {
@@ -65,13 +74,21 @@ fn parse_tzsp_header(buf: &[u8]) -> Option<usize> {
     None
 }
 
-/// Strip TZSP headers from a packet if present.
+/// Strip TZSP headers from a packet, if present.
+///
+/// Returns `None` (never the original, still-wrapped packet) whenever
+/// the frame isn't a recognisable Ethernet/IPv4/UDP/TZSP packet on
+/// port 37008, or its TZSP header can't be walked cleanly -- callers
+/// drop these rather than writing them through to the "cleaned"
+/// capture, which would otherwise silently reintroduce the TZSP/IP/
+/// Ethernet wrapper for exactly the packets most likely to confuse
+/// downstream analysis.
 fn strip_tzsp(data: &[u8]) -> Option<&[u8]> {
     const ETHER_LEN: usize = 14;
     const UDP_PORT_TZSP: u16 = 37008;
 
     if data.len() < ETHER_LEN {
-        return Some(data);
+        return None;
     }
 
     // ----------------------------
@@ -79,25 +96,25 @@ fn strip_tzsp(data: &[u8]) -> Option<&[u8]> {
     // ----------------------------
     let ether_type = read_u16(&data[12..14]);
     if ether_type != 0x0800 {
-        return Some(data); // not IPv4
+        return None; // not IPv4
     }
 
     // ----------------------------
     // IPv4
     // ----------------------------
     if data.len() < ETHER_LEN + 20 {
-        return Some(data);
+        return None;
     }
 
     let ip = &data[ETHER_LEN..];
     let ihl = (ip[0] & 0x0F) as usize * 4;
     if data.len() < ETHER_LEN + ihl {
-        return Some(data);
+        return None;
     }
 
     let protocol = ip[9];
     if protocol != 17 {
-        return Some(data); // not UDP
+        return None; // not UDP
     }
 
     // ----------------------------
@@ -105,12 +122,12 @@ fn strip_tzsp(data: &[u8]) -> Option<&[u8]> {
     // ----------------------------
     let udp = &ip[ihl..];
     if udp.len() < 8 {
-        return Some(data);
+        return None;
     }
 
     let dst_port = read_u16(&udp[2..4]);
     if dst_port != UDP_PORT_TZSP {
-        return Some(data);
+        return None;
     }
 
     // ----------------------------
@@ -118,15 +135,11 @@ fn strip_tzsp(data: &[u8]) -> Option<&[u8]> {
     // ----------------------------
     let tzsp = &udp[8..];
 
-    let tzsp_hdr_len = match parse_tzsp_header(tzsp) {
-        Some(v) => v,
-        None => return Some(data),
-    };
+    let tzsp_hdr_len = parse_tzsp_header(tzsp)?;
 
     if tzsp_hdr_len >= tzsp.len() {
-        return Some(data);
+        return None;
     }
-
 
     Some(&tzsp[tzsp_hdr_len..])
 }
@@ -185,7 +198,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // End device search
 
 
-    // Open capture socket
+    // Open capture socket. Blocking with a short read timeout (rather
+    // than non-blocking + a busy-spin loop below) -- the previous
+    // non-blocking setup meant the capture thread spun at ~100% CPU
+    // for the whole life of the capture, even when idle, which is
+    // wasteful for a capture meant to run for hours/days and can make
+    // the actual packet-drop risk below worse by starving the box.
     let mut cap = Capture::from_device(device)
         .unwrap_or_else(|e| {
             eprintln!("Error creating capture on {}: {}", &args.interface, e);
@@ -194,12 +212,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .promisc(true)
         .immediate_mode(true)
         .snaplen(65535)
+        .timeout(1000)
         .open()
         .unwrap_or_else(|e| {
             eprintln!("Error opening capture on {}: {}", &args.interface, e);
             std::process::exit(1);
         });
-    cap = cap.setnonblock()?;
 
     cap.filter("udp port 37008", true)?;
 
@@ -225,6 +243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Capturing UDP packets on port 37008 on {}...", &args.interface);
     let mut current_file_size: u64 = 0;
+    let mut unstrippable_count: u64 = 0;
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -233,30 +252,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match cap.next_packet() {
             Ok(packet) => {
-                if let Some(stripped) = strip_tzsp(packet.data) {
-                    // Calculate new packet header and write
-                    let mut new_header = *packet.header;
-                    new_header.caplen = stripped.len() as u32;
-                    new_header.len = stripped.len() as u32;
+                match strip_tzsp(packet.data) {
+                    Some(stripped) => {
+                        // Calculate new packet header and write
+                        let mut new_header = *packet.header;
+                        new_header.caplen = stripped.len() as u32;
+                        new_header.len = stripped.len() as u32;
 
-                    savefile.write(&pcap::Packet {
-                        header: &new_header,
-                        data: stripped,
-                    });
+                        savefile.write(&pcap::Packet {
+                            header: &new_header,
+                            data: stripped,
+                        });
 
-                    // Update file size counter, rotate if needed
-                    current_file_size += stripped.len() as u64;
-                    if current_file_size >= max_file_size {
-                        println!("Rotating file: {}", &current_filename);
-                        savefile.flush()?;
-                        current_filename = generate_filename(&args.output_prefix);
-                        savefile = Capture::dead(linktype)?.savefile(&current_filename)?;
-                        current_file_size = 0;
+                        // Update file size counter, rotate if needed
+                        current_file_size += stripped.len() as u64;
+                        if current_file_size >= max_file_size {
+                            println!("Rotating file: {}", &current_filename);
+                            savefile.flush()?;
+                            current_filename = generate_filename(&args.output_prefix);
+                            savefile = Capture::dead(linktype)?.savefile(&current_filename)?;
+                            current_file_size = 0;
+
+                            // libpcap's own drop counters (kernel/if
+                            // buffer overflow) -- the only way to know
+                            // after the fact whether a long capture
+                            // actually missed packets under load.
+                            if let Ok(stats) = cap.stats() {
+                                println!(
+                                    "Capture stats so far: received={} dropped={} if_dropped={}, unstrippable={}",
+                                    stats.received, stats.dropped, stats.if_dropped, unstrippable_count,
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        // Not a strippable TZSP/UDP/IPv4/Ethernet
+                        // frame (shouldn't normally happen given the
+                        // "udp port 37008" capture filter, but if it
+                        // does, drop it rather than writing the raw,
+                        // still-wrapped packet into the "cleaned"
+                        // output -- see strip_tzsp()'s own docs.
+                        unstrippable_count += 1;
                     }
                 }
             }
-            Err(pcap::Error::NoMorePackets) | Err(pcap::Error::TimeoutExpired)  => {
-                // non-blocking: no packet right now
+            Err(pcap::Error::TimeoutExpired) => {
+                // Just a periodic wakeup to re-check `running` --
+                // expected regularly while idle, not an error.
                 continue;
             }
             Err(e) => {
@@ -266,6 +308,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     savefile.flush()?;
+    if let Ok(stats) = cap.stats() {
+        println!(
+            "Final capture stats: received={} dropped={} if_dropped={}, unstrippable={}",
+            stats.received, stats.dropped, stats.if_dropped, unstrippable_count,
+        );
+    }
     println!("Exiting cleanly...");
     Ok(())
 }
