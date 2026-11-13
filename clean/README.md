@@ -16,7 +16,7 @@ To capture and strip in one step instead, see
 
 | Tool | Input | Output | Notes |
 |------|-------|--------|-------|
-| [`tzsp_strip_rs`](tzsp_strip_rs/README.md) | pcap or pcapng | pcap | Fastest. |
+| [`tzsp_strip_rs`](tzsp_strip_rs/README.md) | pcap or pcapng | pcap (ns timestamps) | Fastest. Pure Rust, no libpcap. |
 | [`tzsp_strip_py`](tzsp_strip_py/README.md) | pcap or pcapng | pcapng | Easiest to modify. |
 
 Both tools parse each packet (Ethernet → IPv4 or IPv6 → UDP → TZSP, including TZSP

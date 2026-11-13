@@ -4,6 +4,9 @@ Removes the Ethernet/IP/UDP/TZSP wrapper from every packet in an existing
 MikroTik sniffer capture. It writes a new pcap file containing only the
 original sniffed frames, with their original timestamps.
 
+It's pure Rust: it reads pcap and pcapng itself, with no libpcap needed to
+build or run it.
+
 ## How it works
 
 For each packet in the input file it:
@@ -15,25 +18,28 @@ For each packet in the input file it:
 3. Walks the TZSP header's tag list, handling the zero-length PADDING and END
    tags.
 4. Writes everything after the TZSP header to the output, setting the packet
-   length to the stripped size.
+   length to the stripped size and keeping the original timestamp to the
+   nanosecond. For pcapng input, each interface's timestamp resolution
+   (`if_tsresol`) and offset (`if_tsoffset`) are applied.
 
 Packets that fail any of these checks are skipped and counted. Packets whose
 TZSP header says they carry something other than Ethernet (e.g. 802.11) are
 skipped and counted separately, with a warning when the first one is seen.
 
-If the input file isn't Ethernet (for example a capture taken on Linux `any`),
-the tool exits with an error before creating the output file.
+If the input isn't Ethernet (for example a capture taken on Linux `any`), the
+tool exits with an error without creating the output file. An input with no
+packets produces a valid, empty output file.
+
+pcapng blocks that can't be used are counted as skipped: Simple Packet Blocks
+(they have no timestamp), the obsolete Packet Block, and packets referring to an
+interface that wasn't described.
 
 ## Installing
 
 ### Prerequisites
 
-- A Rust toolchain (`cargo`) supporting edition 2024 (Rust 1.85 or newer), e.g.
-  via [rustup](https://rustup.rs/).
-- libpcap development headers:
-  - Debian/Ubuntu: `sudo apt install libpcap-dev`
-  - Fedora/RHEL: `sudo dnf install libpcap-devel`
-  - macOS: libpcap ships with the OS.
+Just a Rust toolchain (`cargo`) supporting edition 2024 (Rust 1.85 or newer),
+e.g. via [rustup](https://rustup.rs/). No system libraries are needed.
 
 ### Build
 
@@ -63,8 +69,8 @@ tzsp_strip_rs [-p PORT] <input> <output>
 
 | Argument / flag | Default | Description |
 |-----------------|---------|-------------|
-| `<input>` | *(required)* | Capture to clean. Anything libpcap can read: pcap or pcapng. |
-| `<output>` | *(required)* | File to write. Always classic pcap, whatever extension you give it. Overwritten if it exists. |
+| `<input>` | *(required)* | Capture to clean: pcap (µs or ns timestamps) or pcapng. Detected from the file's contents, not its extension. |
+| `<output>` | *(required)* | File to write. Always classic pcap with nanosecond timestamps, whatever extension you give it. Overwritten if it exists. |
 | `-p`, `--port PORT` | `37008` | UDP destination port the TZSP stream was sent to. |
 | `-h`, `--help` | | Show help. |
 | `-V`, `--version` | | Show version. |
