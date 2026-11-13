@@ -8,7 +8,7 @@
 
 //  Standard
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufWriter, IoSliceMut, Write};
+use std::io::{self, BufWriter, IoSliceMut};
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::{
@@ -26,6 +26,7 @@ use nix::sys::socket::{
 };
 use nix::sys::time::TimeSpec;
 use socket2::{Domain, Protocol, Socket, Type};
+use tzsp::pcap::{self, PcapWriter};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -55,40 +56,8 @@ struct Args {
 /// net.core.rmem_max; the effective size is printed at startup.
 const RECV_BUFFER_BYTES: usize = 8 << 20;
 
-/// Largest possible UDP payload; also the output snaplen.
+/// Largest possible UDP payload.
 const MAX_DATAGRAM: usize = 65535;
-
-// Classic pcap format with nanosecond timestamps: a 24-byte file
-// header, then a 16-byte record header plus the data for each packet.
-// See https://www.tcpdump.org/manpages/pcap-savefile.5.html
-const PCAP_FILE_HEADER_LEN: u64 = 24;
-const PCAP_RECORD_HEADER_LEN: u64 = 16;
-const PCAP_MAGIC_NANOSECOND: u32 = 0xa1b2_3c4d;
-const LINKTYPE_ETHERNET: u32 = 1;
-
-/// The 24-byte pcap file header (native byte order, as readers detect
-/// it from the magic number).
-fn pcap_file_header() -> Vec<u8> {
-    let mut h = Vec::with_capacity(PCAP_FILE_HEADER_LEN as usize);
-    h.extend_from_slice(&PCAP_MAGIC_NANOSECOND.to_ne_bytes());
-    h.extend_from_slice(&2u16.to_ne_bytes()); // version major
-    h.extend_from_slice(&4u16.to_ne_bytes()); // version minor
-    h.extend_from_slice(&0i32.to_ne_bytes()); // thiszone (unused)
-    h.extend_from_slice(&0u32.to_ne_bytes()); // sigfigs (unused)
-    h.extend_from_slice(&(MAX_DATAGRAM as u32).to_ne_bytes()); // snaplen
-    h.extend_from_slice(&LINKTYPE_ETHERNET.to_ne_bytes());
-    h
-}
-
-/// The 16-byte record header for one packet.
-fn pcap_record_header(timestamp: Duration, len: usize) -> [u8; 16] {
-    let mut h = [0u8; 16];
-    h[0..4].copy_from_slice(&(timestamp.as_secs() as u32).to_ne_bytes());
-    h[4..8].copy_from_slice(&timestamp.subsec_nanos().to_ne_bytes());
-    h[8..12].copy_from_slice(&(len as u32).to_ne_bytes()); // captured length
-    h[12..16].copy_from_slice(&(len as u32).to_ne_bytes()); // original length
-    h
-}
 
 /// Parse a size such as `500MB`, `1 GiB`, `2g` or `1048576` into bytes.
 ///
@@ -162,9 +131,7 @@ fn create_output_file(prefix: &str, secs: u64) -> io::Result<(String, File)> {
 /// The pcap file currently being written.
 struct Output {
     name: String,
-    writer: BufWriter<File>,
-    /// Bytes on disk once buffered data is flushed.
-    size: u64,
+    writer: PcapWriter<BufWriter<File>>,
 }
 
 impl Output {
@@ -172,16 +139,18 @@ impl Output {
         let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let (name, file) = create_output_file(prefix, secs)
             .map_err(|e| format!("Can't create output file for prefix '{}': {}", prefix, e))?;
-        let mut writer = BufWriter::new(file);
-        writer.write_all(&pcap_file_header())?;
-        Ok(Output { name, writer, size: PCAP_FILE_HEADER_LEN })
+        let writer = PcapWriter::new(BufWriter::new(file))?;
+        Ok(Output { name, writer })
     }
 
     fn write(&mut self, timestamp: Duration, frame: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        self.writer.write_all(&pcap_record_header(timestamp, frame.len()))?;
-        self.writer.write_all(frame)?;
-        self.size += PCAP_RECORD_HEADER_LEN + frame.len() as u64;
+        self.writer.write_packet(timestamp, frame)?;
         Ok(())
+    }
+
+    /// Bytes on disk once buffered data is flushed.
+    fn size(&self) -> u64 {
+        self.writer.bytes_written()
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -375,8 +344,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // --max-size, so files never exceed it (unless one packet
         // alone is bigger than the limit, in which case it gets a file
         // to itself).
-        let record_len = PCAP_RECORD_HEADER_LEN + frame.len() as u64;
-        if output.size + record_len > max_file_size && output.size > PCAP_FILE_HEADER_LEN {
+        let record_len = pcap::RECORD_HEADER_LEN + frame.len() as u64;
+        if output.size() + record_len > max_file_size && output.size() > pcap::FILE_HEADER_LEN {
             output.flush()?;
             let next = Output::create(&args.output_prefix)?;
             println!("Rotating file: {} -> {}", output.name, next.name);

@@ -16,6 +16,7 @@ in this repo:
 | `DEFAULT_PORT`, `ENCAP_ETHERNET` | 37008 and 1. |
 | `encap_name(encap)` | Readable name for an encapsulation value, for messages. |
 | `is_linux_cooked(linktype)` | True for the Linux "any" capture link types, to explain why such input is rejected. |
+| `pcap::PcapWriter` | Writes the tools' output: classic pcap, nanosecond timestamps, link type Ethernet, with an exact running byte count (used for rotation). |
 
 ## Tests
 

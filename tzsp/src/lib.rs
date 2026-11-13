@@ -15,8 +15,12 @@
 //! Both return the TZSP encapsulation type along with the inner frame;
 //! callers decide what to do with non-Ethernet encapsulations.
 //!
+//! [`pcap::PcapWriter`] writes the tools' output files.
+//!
 //! `clean/tzsp_strip_py/main.py` is a Python port of this module. Both are
 //! checked against the shared cases in `testdata/tzsp_vectors.tsv`.
+
+pub mod pcap;
 
 /// Standard UDP port for TZSP streams.
 pub const DEFAULT_PORT: u16 = 37008;
