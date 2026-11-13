@@ -13,16 +13,16 @@ from an existing capture after the fact).
 
 1. Opens the given interface in promiscuous mode with the BPF filter
    `udp port 37008`.
-2. For each packet, walks Ethernet → IPv4 → UDP → TZSP (including TZSP tagged
-   fields such as padding) and keeps only the encapsulated frame.
+2. For each packet, walks Ethernet → IPv4 or IPv6 → UDP → TZSP (including TZSP
+   tagged fields such as padding) and keeps only the encapsulated frame.
 3. Writes the stripped frame to the current output file, keeping the original
    capture timestamp.
 4. When the bytes written to the current file reach `--max-size`, it closes it
    and starts a new one.
 5. On Ctrl-C it flushes the current file and prints the final libpcap stats.
 
-Packets that can't be parsed as Ethernet/IPv4/UDP/TZSP (non-IPv4, truncated,
-malformed TZSP header) are **dropped**, not written through still wrapped. They
+Packets that can't be parsed as Ethernet/IP/UDP/TZSP (other ethertypes,
+truncated, malformed TZSP header) are **dropped**, not written through still wrapped. They
 are counted and reported as `unstrippable` in the stats output.
 
 ## Installing
@@ -113,10 +113,18 @@ set streaming-enabled=yes streaming-server=<capture-host-ip> filter-stream=yes
 /tool sniffer start
 ```
 
+`<capture-host-ip>` can be an IPv4 or an IPv6 address, provided your RouterOS
+version accepts IPv6 for `streaming-server`.
+
 ## Notes and limitations
 
-- Only TZSP carried over IPv4 is handled; a stream sent to an IPv6 address is
-  dropped as unstrippable.
+- TZSP over IPv4 and IPv6 are both handled. For IPv6, UDP must directly follow
+  the IPv6 header; packets with extension headers are dropped as unstrippable.
+- IP fragments aren't reassembled. If the router has to fragment a TZSP
+  datagram (large sniffed frames on a path with a small MTU), the first fragment
+  is written truncated and the rest are dropped.
+- VLAN-tagged frames are not handled. The capture host must receive the stream
+  untagged.
 - The rotation size counts only the stripped packet bytes, not pcap
   per-packet headers, so files end up slightly larger than `--max-size`.
 - File names have one-second resolution. With a very small `--max-size` and
