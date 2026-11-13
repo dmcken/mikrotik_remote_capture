@@ -1,6 +1,6 @@
 # tzsp_strip_rs
 
-Removes the Ethernet/IPv4/UDP/TZSP wrapper from every packet in an existing
+Removes the Ethernet/IP/UDP/TZSP wrapper from every packet in an existing
 MikroTik sniffer capture. It writes a new pcap file containing only the
 original sniffed frames, with their original timestamps.
 
@@ -8,8 +8,9 @@ original sniffed frames, with their original timestamps.
 
 For each packet in the input file it:
 
-1. Checks for an Ethernet frame with ethertype IPv4 (`0x0800`).
-2. Checks that the IPv4 protocol is UDP and the destination port is `37008`.
+1. Checks for an Ethernet frame with ethertype IPv4 (`0x0800`) or IPv6
+   (`0x86DD`).
+2. Checks that the IP protocol (IPv6: Next Header) is UDP and the destination port is `37008`.
 3. Walks the TZSP header's tag list, handling the zero-length PADDING and END
    tags.
 4. Writes everything after the TZSP header to the output, setting the packet
@@ -78,5 +79,6 @@ cargo run --release -- raw.pcapng clean.pcap
 - Skipped packets are not counted or reported.
 - A read error partway through the input (e.g. a truncated file) ends
   processing silently, the same as reaching the end of the file.
-- IPv4 only, Ethernet input only, no VLAN tags, no IP reassembly. See the
+- No IPv6 extension headers, Ethernet input only, no VLAN tags, no IP
+  reassembly. See the
   [parent README](../README.md#shared-limitations).
