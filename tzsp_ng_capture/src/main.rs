@@ -35,7 +35,7 @@ struct Args {
     listen: IpAddr,
 
     /// UDP port the router streams TZSP to
-    #[arg(short, long, default_value_t = 37008)]
+    #[arg(short, long, default_value_t = tzsp::DEFAULT_PORT)]
     port: u16,
 
     /// File size at which to rotate, e.g. 500MB, 1GB (binary units)
@@ -88,75 +88,6 @@ fn pcap_record_header(timestamp: Duration, len: usize) -> [u8; 16] {
     h[8..12].copy_from_slice(&(len as u32).to_ne_bytes()); // captured length
     h[12..16].copy_from_slice(&(len as u32).to_ne_bytes()); // original length
     h
-}
-
-/// TZSP encapsulation value for Ethernet frames -- the only one this
-/// tool writes, since the output file is labelled as Ethernet.
-const TZSP_ENCAP_ETHERNET: u16 = 1;
-
-fn read_u16(buf: &[u8]) -> u16 {
-    ((buf[0] as u16) << 8) | (buf[1] as u16)
-}
-
-// Parse TZSP header and return its total size
-fn parse_tzsp_header(buf: &[u8]) -> Option<usize> {
-    if buf.len() < 4 {
-        return None;
-    }
-
-    // TZSP fixed header: version (1) + type (1) + proto (2)
-    let mut offset = 4;
-
-    while offset < buf.len() {
-        let tag = buf[offset];
-        offset += 1;
-
-        if tag == 1 {
-            // END tag -- zero-length, no value byte follows.
-            return Some(offset);
-        }
-
-        if tag == 0 {
-            // PADDING tag -- also zero-length (no length byte of its
-            // own), unlike every other tag. Treating it like a normal
-            // tagged field (as before) reads the next tag's type byte
-            // as a bogus length and desyncs the rest of the walk --
-            // RouterOS's sniffer does emit this tag for alignment.
-            continue;
-        }
-
-        if offset >= buf.len() {
-            return None;
-        }
-
-        let tag_len = buf[offset] as usize;
-        offset += 1 + tag_len;
-
-        if offset > buf.len() {
-            return None;
-        }
-    }
-
-    None
-}
-
-/// Strip the TZSP header from a received datagram.
-///
-/// On success returns the TZSP encapsulation type (bytes 2-3 of the
-/// header, e.g. 1 = Ethernet, 18 = 802.11) and the encapsulated frame.
-/// Returns `None` if the header can't be walked cleanly or carries no
-/// frame (e.g. keepalives).
-fn strip_tzsp(tzsp: &[u8]) -> Option<(u16, &[u8])> {
-    let tzsp_hdr_len = parse_tzsp_header(tzsp)?;
-
-    if tzsp_hdr_len >= tzsp.len() {
-        return None;
-    }
-
-    // parse_tzsp_header() guarantees the 4-byte fixed header exists.
-    let encapsulation = read_u16(&tzsp[2..4]);
-
-    Some((encapsulation, &tzsp[tzsp_hdr_len..]))
 }
 
 /// Parse a size such as `500MB`, `1 GiB`, `2g` or `1048576` into bytes.
@@ -318,17 +249,6 @@ fn open_socket(listen: IpAddr, port: u16) -> Result<Socket, Box<dyn std::error::
     Ok(socket)
 }
 
-/// Human-readable name for a TZSP encapsulation value.
-fn tzsp_encap_name(encap: u16) -> &'static str {
-    match encap {
-        1 => "Ethernet",
-        18 => "IEEE 802.11",
-        119 => "Prism header",
-        127 => "802.11 AVS",
-        _ => "unknown",
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
@@ -427,8 +347,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let frame = match strip_tzsp(&buf[..datagram.len]) {
-            Some((TZSP_ENCAP_ETHERNET, frame)) => frame,
+        let frame = match tzsp::strip(&buf[..datagram.len]) {
+            Some((tzsp::ENCAP_ETHERNET, frame)) => frame,
             Some((encap, _)) => {
                 // Valid TZSP, but carrying something other than
                 // Ethernet (e.g. 802.11). Writing it into an
@@ -436,7 +356,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if unsupported_encap_count == 0 {
                     eprintln!(
                         "Warning: skipping TZSP packets with non-Ethernet encapsulation {} ({}); only Ethernet (1) is supported",
-                        encap, tzsp_encap_name(encap),
+                        encap, tzsp::encap_name(encap),
                     );
                 }
                 unsupported_encap_count += 1;
@@ -491,52 +411,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// TZSP header (version 1, type 0 "received", given encapsulation)
-    /// with a PADDING tag then END, followed by the inner frame.
-    fn tzsp_payload_encap(encap: u16, inner: &[u8]) -> Vec<u8> {
-        let mut v = vec![0x01, 0x00];
-        v.extend_from_slice(&encap.to_be_bytes());
-        v.extend_from_slice(&[0x00, 0x01]); // PADDING, END
-        v.extend_from_slice(inner);
-        v
-    }
-
-    const INNER: &[u8] = b"inner ethernet frame";
-
-    #[test]
-    fn strips_ethernet_payload() {
-        let d = tzsp_payload_encap(TZSP_ENCAP_ETHERNET, INNER);
-        assert_eq!(strip_tzsp(&d), Some((TZSP_ENCAP_ETHERNET, INNER)));
-    }
-
-    #[test]
-    fn strips_after_tagged_field() {
-        // Tag 0x0A with a 3-byte value, then END.
-        let mut d = vec![0x01, 0x00, 0x00, 0x01, 0x0A, 0x03, 0xAA, 0xBB, 0xCC, 0x01];
-        d.extend_from_slice(INNER);
-        assert_eq!(strip_tzsp(&d), Some((TZSP_ENCAP_ETHERNET, INNER)));
-    }
-
-    #[test]
-    fn returns_non_ethernet_encapsulation() {
-        let d = tzsp_payload_encap(18, INNER);
-        assert_eq!(strip_tzsp(&d), Some((18, INNER)));
-    }
-
-    #[test]
-    fn rejects_malformed_or_empty() {
-        let no_frame = tzsp_payload_encap(TZSP_ENCAP_ETHERNET, b"");
-        for bad in [
-            &[][..],
-            &[0x01, 0x00, 0x00][..],                   // short fixed header
-            &[0x01, 0x00, 0x00, 0x01, 0x00, 0x00][..], // no END tag
-            &[0x01, 0x00, 0x00, 0x01, 0x0A, 0x09, 0xAA][..], // tag longer than data
-            &no_frame[..],                             // keepalive-style, no frame
-        ] {
-            assert_eq!(strip_tzsp(bad), None, "{:02x?} should be rejected", bad);
-        }
-    }
 
     #[test]
     fn candidate_filenames() {

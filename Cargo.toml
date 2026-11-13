@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "tzsp",
+    "tzsp_ng_capture",
+    "clean/tzsp_strip_rs",
+]

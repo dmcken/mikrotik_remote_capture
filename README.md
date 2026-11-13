@@ -33,6 +33,17 @@ This leaves the TZSP headers in place however, to use more advanced tools you wo
 
 * clean/ contains both a python and rust tools to remove the TZSP headers from an existing capture.
 * tzsp_ng_capture/ is a rust program that receives the stream on a UDP socket (no root or libpcap needed) and strips the header before writing to disk.
+* tzsp/ is the TZSP parsing library shared by the rust tools.
+* testdata/ holds parser test cases shared by the rust and python implementations.
+
+### Building the rust tools
+
+The rust code is a single Cargo workspace. From the repo root:
+
+```bash
+cargo build --release   # binaries land in target/release/
+cargo test              # runs every crate's tests, including the shared parser cases
+```
 
 ## Notes
 

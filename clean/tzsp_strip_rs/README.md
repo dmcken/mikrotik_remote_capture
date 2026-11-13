@@ -37,17 +37,21 @@ the tool exits with an error before creating the output file.
 
 ### Build
 
-```bash
-cd clean/tzsp_strip_rs
-cargo build --release
-```
-
-The binary is written to `target/release/tzsp_strip_rs`. To install it into
-`~/.cargo/bin` instead:
+This tool is part of the repo's Cargo workspace. From the repo root:
 
 ```bash
-cargo install --path .
+cargo build --release -p tzsp_strip_rs
 ```
+
+The binary is written to `target/release/tzsp_strip_rs` under the repo root. To
+install it into `~/.cargo/bin` instead:
+
+```bash
+cargo install --path clean/tzsp_strip_rs
+```
+
+The Ethernet/IP/UDP/TZSP parsing lives in the shared
+[`tzsp`](../../tzsp/README.md) crate.
 
 No special privileges are needed, since it only reads and writes files.
 
@@ -86,7 +90,7 @@ wireshark clean.pcap
 Or straight from `cargo`:
 
 ```bash
-cargo run --release -- raw.pcapng clean.pcap
+cargo run --release -p tzsp_strip_rs -- raw.pcapng clean.pcap
 ```
 
 ## Limitations

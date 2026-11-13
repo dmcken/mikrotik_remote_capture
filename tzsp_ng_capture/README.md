@@ -53,17 +53,20 @@ No libpcap or other system libraries are needed.
 
 ### Build
 
-```bash
-cd tzsp_ng_capture
-cargo build --release
-```
-
-The binary is written to `target/release/tzsp_ng_rotator`. To install it into
-`~/.cargo/bin` instead:
+This tool is part of the repo's Cargo workspace. From the repo root:
 
 ```bash
-cargo install --path .
+cargo build --release -p tzsp_ng_rotator
 ```
+
+The binary is written to `target/release/tzsp_ng_rotator` under the repo root.
+To install it into `~/.cargo/bin` instead:
+
+```bash
+cargo install --path tzsp_ng_capture
+```
+
+The TZSP header parsing lives in the shared [`tzsp`](../tzsp/README.md) crate.
 
 ### Firewall
 
@@ -94,7 +97,7 @@ an explanation and exits; use `--listen` to restrict to one address instead.
 
 ### Examples
 
-Listen on the default port with the defaults (1 GiB files named
+Paths below are relative to the repo root. Listen on the default port with the defaults (1 GiB files named
 `capture_<ts>.pcap`):
 
 ```bash

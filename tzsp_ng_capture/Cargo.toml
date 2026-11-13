@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+tzsp = { path = "../tzsp" }
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
 nix = { version = "0.30", features = ["socket", "uio", "net", "time"] }

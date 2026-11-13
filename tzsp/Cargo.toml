@@ -1,0 +1,7 @@
+[package]
+name = "tzsp"
+version = "0.1.0"
+edition = "2021"
+description = "TZSP (TaZmen Sniffer Protocol) header parsing shared by the capture and strip tools"
+
+[dependencies]
