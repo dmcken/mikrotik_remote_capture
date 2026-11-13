@@ -82,7 +82,7 @@ tzsp_ng_rotator --interface <INTERFACE> [--max-size <SIZE>] [--output-prefix <PR
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--interface <INTERFACE>` | `-i` | *(required)* | Network interface to capture on, i.e. the interface that receives the stream from the router (e.g. `eth0`). |
-| `--max-size <SIZE>` | `-m` | `1GB` | Size at which the output file is rotated. A whole number with an optional unit: `B`, `KB`/`KiB`, `MB`/`MiB`, `GB`/`GiB`, `TB`/`TiB` (case-insensitive). All units are binary (1 KB = 1024 bytes). Decimals like `1.5GB` are not accepted. |
+| `--max-size <SIZE>` | `-m` | `1GB` | Size at which the output file is rotated. A whole number with an optional unit, with or without a space: `B`, `K`/`KB`/`KiB`, `M`/`MB`/`MiB`, `G`/`GB`/`GiB`, `T`/`TB`/`TiB` (case-insensitive), e.g. `500MB`, `1 GB`, `2g`. All units are binary (1 KB = 1024 bytes). Zero and decimals like `1.5GB` are rejected; use a smaller unit instead (`1536MB`). |
 | `--output-prefix <PREFIX>` | `-o` | `capture` | Prefix for output files. Files are named `<PREFIX>_<unix-timestamp>.pcap` in the current directory; the prefix may include a path, e.g. `/data/caps/site1`. Existing files are never overwritten: if the name is taken (two rotations in the same second, or a file from an earlier run), `_1`, `_2`, … is added, e.g. `capture_1763025120_1.pcap`. |
 | `--help` | `-h` | | Show help. |
 | `--version` | `-V` | | Show version. |

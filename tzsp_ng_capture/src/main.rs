@@ -20,7 +20,7 @@ struct Args {
     #[arg(short, long)]
     interface: String,
 
-    /// Maximum file size (bytes)
+    /// File size at which to rotate, e.g. 500MB, 1GB (binary units)
     #[arg(short, long, default_value = "1GB")]
     max_size: String,
 
@@ -169,31 +169,47 @@ fn strip_tzsp(data: &[u8]) -> Option<(u16, &[u8])> {
     Some((encapsulation, &tzsp[tzsp_hdr_len..]))
 }
 
+/// Parse a size such as `500MB`, `1 GiB`, `2g` or `1048576` into bytes.
+///
+/// A whole number, optionally followed (with or without a space) by a
+/// unit: B, K/KB/KiB, M/MB/MiB, G/GB/GiB or T/TB/TiB, case-insensitive.
+/// All units are binary (1 KB = 1024 bytes). Zero, decimals and values
+/// that overflow a u64 are rejected.
 fn parse_size(input: &str) -> Result<u64, String> {
-    let input = input.trim().to_uppercase();
+    let s = input.trim();
+    let digits_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, unit) = s.split_at(digits_end);
 
-    let (num_part, unit) = input
-        .chars()
-        .partition::<String, _>(|c| c.is_ascii_digit());
+    if num.is_empty() {
+        return Err(format!("Invalid size '{}': must start with a number, e.g. 500MB", input));
+    }
+    if unit.starts_with(['.', ',']) {
+        return Err(format!("Invalid size '{}': decimals aren't supported, use a smaller unit (e.g. 1536MB)", input));
+    }
 
-    let value: u64 = num_part
-        .parse()
-        .map_err(|_| "Invalid number")?;
+    let too_large = || format!("Invalid size '{}': too large", input);
+    // Only digits, so parse() can only fail on overflow.
+    let value: u64 = num.parse().map_err(|_| too_large())?;
 
-    let multiplier = match unit.as_str() {
+    let multiplier: u64 = match unit.trim_start().to_ascii_uppercase().as_str() {
         "" | "B" => 1,
-        "KB" => 1024,
-        "MB" => 1024 * 1024,
-        "GB" => 1024 * 1024 * 1024,
-        "TB" => 1024 * 1024 * 1024 * 1024,
-        "KIB" => 1024,
-        "MIB" => 1024 * 1024,
-        "GIB" => 1024 * 1024 * 1024,
-        "TIB" => 1024 * 1024 * 1024 * 1024,
-        _ => return Err(format!("Unknown unit: {}", unit)),
+        "K" | "KB" | "KIB" => 1 << 10,
+        "M" | "MB" | "MIB" => 1 << 20,
+        "G" | "GB" | "GIB" => 1 << 30,
+        "T" | "TB" | "TIB" => 1 << 40,
+        _ => {
+            return Err(format!(
+                "Invalid size '{}': unknown unit '{}' (use B, KB, MB, GB or TB)",
+                input, unit.trim_start(),
+            ))
+        }
     };
 
-    Ok(value * multiplier)
+    let bytes = value.checked_mul(multiplier).ok_or_else(too_large)?;
+    if bytes == 0 {
+        return Err(format!("Invalid size '{}': must be greater than zero", input));
+    }
+    Ok(bytes)
 }
 
 /// Pick a `<prefix>_<secs>.pcap` name that `exists` says is free,
@@ -556,5 +572,32 @@ mod tests {
         // 18 = IEEE 802.11; returned as-is for the caller to reject.
         let pkt = ether(0x0800, &ipv4(17, &udp(37008, &tzsp_payload_encap(18, INNER))));
         assert_eq!(strip_tzsp(&pkt), Some((18, INNER)));
+    }
+
+    #[test]
+    fn parse_size_accepts_units_spaces_and_case() {
+        assert_eq!(parse_size("1048576"), Ok(1 << 20));
+        assert_eq!(parse_size("512B"), Ok(512));
+        assert_eq!(parse_size("1GB"), Ok(1 << 30));
+        assert_eq!(parse_size("1 GB"), Ok(1 << 30));
+        assert_eq!(parse_size("1G"), Ok(1 << 30));
+        assert_eq!(parse_size("1gib"), Ok(1 << 30));
+        assert_eq!(parse_size("  500 mb  "), Ok(500 << 20));
+        assert_eq!(parse_size("2K"), Ok(2048));
+        assert_eq!(parse_size("1TiB"), Ok(1 << 40));
+    }
+
+    #[test]
+    fn parse_size_rejects_bad_input() {
+        for bad in ["", "GB", "1.5GB", "1,5GB", "1x2GB", "1 G B", "1PB", "-1GB", "0", "0GB"] {
+            assert!(parse_size(bad).is_err(), "{:?} should be rejected", bad);
+        }
+    }
+
+    #[test]
+    fn parse_size_rejects_overflow() {
+        assert!(parse_size("99999999999999999999").is_err()); // > u64::MAX
+        assert!(parse_size("16777216TB").is_err()); // 2^24 * 2^40 = 2^64
+        assert_eq!(parse_size("16777215TB"), Ok(16777215u64 << 40));
     }
 }
