@@ -19,14 +19,15 @@ To capture and strip in one step instead, see
 | [`tzsp_strip_rs`](tzsp_strip_rs/README.md) | pcap or pcapng | pcap | Fastest. Port fixed at 37008. |
 | [`tzsp_strip_py`](tzsp_strip_py/README.md) | pcapng | pcapng | Port configurable with `-p`. Reports skipped packets. |
 
-Both tools parse each packet (Ethernet → IPv4 → UDP → TZSP, including TZSP
+Both tools parse each packet (Ethernet → IPv4 or IPv6 → UDP → TZSP, including TZSP
 tagged fields) and only write the inner frame. Packets that aren't valid
 TZSP, or don't parse cleanly, are skipped instead of being written still
 wrapped.
 
 ### Shared limitations
 
-- **IPv4 only.** TZSP sent over IPv6 is skipped.
+- **No IPv6 extension headers.** TZSP over IPv4 and IPv6 are both handled, but
+  for IPv6, UDP must directly follow the IPv6 header.
 - **Ethernet input only.** The input must use the Ethernet link type. A capture
   taken with `tshark -i any` uses Linux cooked (SLL) framing, and every packet
   will be skipped without a warning.
